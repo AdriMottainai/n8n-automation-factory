@@ -1,1 +1,23 @@
+# Secrets & local config
 .env
+.claude/settings.local.json
+.mcp.json
+
+# Personal working artifacts (planning notes, not for the public repo)
+.claude/tasks/
+
+# OS junk
+.DS_Store
+**/.DS_Store
+
+# Project data (per-project outputs & inputs in shared/<projet>/)
+# Each active project under shared/ may contain large/private files (CV, digests…).
+# Whitelist explicitly what you want versioned.
+shared/*/
+
+# Generated workflow snapshots (optional — uncomment to version them)
+# projets/*/workflows/
+
+# Node / IDE artefacts (defensive)
+node_modules/
+.vscode/

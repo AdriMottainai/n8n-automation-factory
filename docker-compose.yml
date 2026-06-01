@@ -20,6 +20,25 @@ x-n8n: &service-n8n
     - N8N_ENCRYPTION_KEY
     - N8N_USER_MANAGEMENT_JWT_SECRET
     - OLLAMA_HOST=${OLLAMA_HOST:-ollama:11434}
+    - N8N_RESTRICT_FILE_ACCESS_TO=/home/node/.n8n-files;/data/shared
+    - TZ=Europe/Paris
+    - GENERIC_TIMEZONE=Europe/Paris
+    # --- Factory: env access depuis Code nodes (requis pour $env dans les workflows) ---
+    - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    # --- Perf/scaling M1 8GB (single-instance) ---
+    - N8N_CONCURRENCY_PRODUCTION_LIMIT=3
+    - NODE_OPTIONS=--max-old-space-size=2048
+    # --- Endpoints services (centralises pour exportabilite des workflows) ---
+    - OLLAMA_LOCAL_URL=http://host.docker.internal:11434
+    - OLLAMA_CLOUD_URL=https://ollama.com
+    - QDRANT_URL=http://qdrant:6333
+    # --- Projet Veille Emploi (W1 feeds + W2 emails) ---
+    - VEILLE_OUTPUT_DIR=/data/shared/veille-emploi
+    - "VEILLE_TO_EMAIL=${VEILLE_TO_EMAIL:?defined in .env, see .env.example}"
+    - VEILLE_BATCH_MAX=40
+    - VEILLE_EMBED_MODEL=bge-m3
+    - VEILLE_SCORE_MODEL_LOCAL=llama3.2:3b
+    - VEILLE_EXTRACT_MODEL_CLOUD=qwen3-coder:480b
   env_file:
     - path: .env
       required: true
@@ -90,6 +109,7 @@ services:
     hostname: n8n
     container_name: n8n
     restart: unless-stopped
+    mem_limit: 2.5g
     ports:
       - 5678:5678
     volumes:
