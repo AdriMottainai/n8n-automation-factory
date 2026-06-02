@@ -6,9 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Automation factory built on the self-hosted AI starter kit. Every new workflow/agent starts here, gets built and tested locally via n8n-mcp, then can be extracted to its own project when mature.
 
+## Environnements & cibles
+
+Cette factory est l'**instance LOCALE de dev** (Mac M1, mono-utilisateur, localhost, pas de webhook public) :
+- **Pas de staging/prod séparés** : tous les workflows cohabitent dans la même instance n8n/Postgres. Un workflow « gradué » (`~/projets/n8n/<projet>/`) continue de tourner dans CETTE instance.
+- **Cible = perso/pro local** : automations pour l'utilisateur, données personnelles (CV, emails). Aucune API LLM payante.
+- **Conséquences assumées** : `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` (OK en local mono-user) ; secrets en `~/.zshrc` + `.env` gitignoré.
+- **Dépôt public** : `github.com/AdriMottainai/n8n-automation-factory` (portfolio) — infra + conventions + doc seulement ; jamais de secrets, CV ni données (`shared/`, `.env*`, `.claude/tasks/` gitignorés).
+- **Bascule prod / multi-user** : déclencheur = instance dédiée, webhook public, ou import de workflows tiers → repasser `BLOCK=true` + Code nodes purs (voir `n8n/conventions.md §4.1`).
+
 ## Factory structure
 
-Ce repo est la **factory** : infra + conventions + leçons capitalisées. Les workflows vivent en Postgres (n8n DB), pas dans le repo. Chaque projet actif a un couloir dédié, déménagé hors du repo une fois mature.
+Ce repo est la **factory** : infra + conventions + leçons capitalisées. Les workflows vivent en Postgres (n8n DB), pas dans le repo. Chaque projet actif a un couloir dédié qui **reste dans la factory** même une fois mature (on archive, on ne déménage pas — voir Cycle de vie).
 
 ```
 self-hosted-ai-starter-kit/             ← FACTORY
@@ -16,7 +25,7 @@ self-hosted-ai-starter-kit/             ← FACTORY
 ├── CLAUDE.md / README.md               ← conventions + porte d'entrée
 ├── .env / .env.example                 ← config non-sensible (secrets en ~/.zshrc)
 ├── .mcp.json / .claude/settings.json   ← MCP + permissions Claude
-├── n8n/                                ← config & assets n8n partagés (sub-workflows à venir)
+├── n8n/                                ← conventions.md + snapshots/config n8n
 ├── shared/                             ← bind mount → /data/shared (container n8n)
 │   └── <nom-projet>/                   ← inputs + outputs projet (gitignored)
 └── projets/                            ← métadonnées projets actifs
@@ -26,42 +35,33 @@ self-hosted-ai-starter-kit/             ← FACTORY
         └── workflows/                  ← snapshots JSON optionnels
 ```
 
-**Pourquoi cette séparation** : `shared/<projet>/` (que n8n voit comme `/data/shared/<projet>/`) porte les données ; `projets/<projet>/` porte les documents humains. À la graduation, on déplace les deux couloirs ensemble vers `~/projets/n8n/<projet>/`.
+**Pourquoi cette séparation** : `shared/<projet>/` (que n8n voit comme `/data/shared/<projet>/`) porte les données ; `projets/<projet>/` porte les documents humains. Les deux **restent dans la factory** même une fois le projet mature (le runtime ne déménage pas — voir Cycle de vie).
 
 ### Démarrer un nouveau projet
 
-1. `mkdir projets/<nom>/ shared/<nom>/` (le second uniquement si le projet manipule des fichiers)
-2. Créer `projets/<nom>/README.md` (mission, IDs n8n, état)
-3. Créer une project memory `project_<nom>_workflow.md` dans `~/.claude/projects/.../memory/` + ajout dans `MEMORY.md`
-4. Créer les workflows dans n8n UI ou via n8n-mcp ; tous les paths utilisateur dans les nodes pointent vers `/data/shared/<nom>/...`
+0. **`public_ok` ?** (défaut **non**) — le projet pourra-t-il figurer dans un portfolio public ? Aujourd'hui la factory **est** le repo public (projets perso). Le jour où un projet est **pro/client/sensible**, on bascule vers **factory privée + repo portfolio public séparé** (cf. EXTRAIRE) ; l'utilisateur le signalera.
+1. `mkdir projets/<nom>/` (+ `shared/<nom>/` si le projet manipule des fichiers)
+2. `projets/<nom>/README.md` (front-matter `public_ok`, mission, IDs n8n, état)
+3. Project memory `project_<nom>_workflow.md` (`type: project`, `volatility: volatile`) + bloc `## PROJECT:<nom>` dans `MEMORY.md`
+4. Config-projet en env vars **préfixées `<PROJ>_`** dans `docker-compose.yml` (`environment:` inline). ⚠️ Toute var référencée en `${...}` dans le compose **doit rester dans `.env` racine** (interpolation au boot).
+5. Workflows dans n8n UI / n8n-mcp ; tous les paths des nodes pointent vers `/data/shared/<nom>/...`. Lire `n8n/conventions.md` avant de construire.
 
-### Graduation (workflow mature, libérer la factory)
+### Cycle de vie : ARCHIVER (défaut) vs EXTRAIRE (exception)
 
-Quand un projet est stable depuis ~1 mois :
+**Principe** : l'instance n8n est **unique et permanente**. Le runtime (workflow en Postgres) et la config (`<PROJ>_*` dans docker-compose) **restent dans la factory pour toujours**. On ne déplace **jamais** un projet hors du repo : déplacer `shared/<nom>` hors de `./shared/` casse le bind-mount → le workflow écrit dans le vide (split-brain).
 
-```bash
-mkdir -p ~/projets/n8n/<nom>/{workflows,qdrant,memory}
+**ARCHIVER** (par défaut, projet stable depuis ~2-3 semaines) = ranger la mémoire, pas déménager :
+1. Snapshot JSON figé : `n8n_get_workflow` → `projets/<nom>/workflows/<id>.json` (strip `availableInMCP`/`binaryMode`).
+2. **Retirer le bloc `## PROJECT:<nom>` de `MEMORY.md`** (le vrai levier de lisibilité du contexte ; le filesystem n'est pas le problème).
+3. (Optionnel) `mv project_<nom>_*.md` vers une archive mémoire.
 
-# Snapshots optionnels (workflow JSON + Qdrant collections)
-for id in <wf-ids>; do
-  curl -s -H "X-N8N-API-KEY: $N8N_API_KEY" \
-    "http://localhost:5678/api/v1/workflows/$id" \
-    > ~/projets/n8n/<nom>/workflows/$id.json
-done
+Le workflow continue de tourner. Désactiver si besoin : `POST /api/v1/workflows/{id}/deactivate`.
 
-# Déménagement des couloirs projet
-mv shared/<nom>     ~/projets/n8n/<nom>/shared
-mv projets/<nom>    ~/projets/n8n/<nom>/projets
+**Avant d'archiver** : promouvoir toute leçon `durable` généralisable (gotcha n8n réutilisable) d'un `project_<nom>_*` vers un `feedback_*` factory — sinon elle part avec le projet et est perdue pour les suivants. Un `project_<nom>_*` ne devrait contenir, à l'archivage, que de l'**état** (`volatile`).
 
-# Déménagement memory projet (les feedbacks transférables RESTENT en factory)
-mv ~/.claude/projects/-Users-adrien-projets-self-hosted-ai-starter-kit/memory/project_<nom>_workflow.md \
-   ~/projets/n8n/<nom>/memory/
-# + retirer la ligne correspondante de MEMORY.md
-```
+**Données** (`archiver ≠ purger`) : si l'automatisation est **terminée** (plus aucun run prévu), snapshot Qdrant (`POST /collections/<col>/snapshots`) puis purge `shared/<nom>/inputs/` ; garder JSON + README.
 
-Les workflows continuent à tourner dans la même instance n8n (Postgres garde tout). Pour désactiver : `POST /api/v1/workflows/{id}/deactivate`.
-
-**Avant de graduer** : vérifier que toutes les leçons transférables (gotchas n8n, patterns réutilisables) sont déjà promues en `feedback_*.md` factory-level — sinon elles partent avec le projet et sont perdues pour les projets suivants.
+**EXTRAIRE** (exception rare) = repo + instance n8n **séparés**. **Uniquement sur déclencheur externe** : déploiement ailleurs, projet devenu produit, ou isolation de données client/sensibles. Jamais la maturité seule (sur 8 Go, 2× n8n + Ollama = exclu). Le jour venu : factory privée + portfolio public séparé, et nouvelle `N8N_ENCRYPTION_KEY` / credentials pour l'instance extraite.
 
 ### Conventions n8n production
 
@@ -69,15 +69,7 @@ Les workflows continuent à tourner dans la même instance n8n (Postgres garde t
 
 ## Stack
 
-```
-Host macOS (Mac M1, 8 GB RAM)
-├── Ollama natif ─── localhost:11434 (GPU Metal)
-│   └── llama3.2:3b (2 GB)
-└── Docker Desktop
-    ├── n8n ──────── localhost:5678 (UI + API)
-    ├── postgres ─── interne (DB backend n8n)
-    └── qdrant ───── localhost:6333 (vector store)
-```
+Mac M1 8 GB : Ollama natif (`localhost:11434`, GPU Metal) + Docker (n8n `:5678`, postgres interne, qdrant `:6333`).
 
 ### Connexions depuis les nodes n8n (Docker)
 
@@ -178,14 +170,7 @@ Si MCP ne se charge pas : verifier le trust dialog au premier lancement, que `$N
 
 ## Construire une automatisation
 
-1. **Decrire** en langage naturel (trigger, traitement, sortie) et utiliser le skill deep-planning pour structurer la requête, et le skill apex pour structurer les étapes d'implémentation de la meilleure automatisation.
-2. **Chercher** un template : `search_templates` → `n8n_deploy_template`
-3. **Generer** si pas de template : `n8n_generate_workflow`
-4. **Valider** : `n8n_validate_workflow`
-5. **Credentials** : `n8n_manage_credentials` (Ollama local, Ollama Cloud, Qdrant, etc.)
-6. **Tester** : `n8n_test_workflow` ou UI n8n
-7. **Iterer** : `n8n_autofix_workflow` / `n8n_update_partial_workflow`
-8. **Activer** : mode "Active" pour les triggers automatiques
+Process : décrire (skills `/deep-planning` + `/apex`) → template (`search_templates` / `n8n_deploy_template`) ou `n8n_generate_workflow` → `n8n_validate_workflow` → credentials → tester → `n8n_autofix_workflow` → activer. Conventions détaillées : `n8n/conventions.md`.
 
 ### Patterns courants
 
@@ -225,7 +210,7 @@ curl http://localhost:6333/           # Qdrant
 
 **Permissions Claude Code** (`.claude/settings.json`) : whitelist stricte pour Docker/git/curl localhost. Deny sur `.env`, destructif, exfil API. Ask sur commit/push/install.
 
-**`N8N_BLOCK_ENV_ACCESS_IN_NODE=true`** (defaut n8n v2) : Code nodes ne lisent pas les env vars.
+**`N8N_BLOCK_ENV_ACCESS_IN_NODE=false`** (overridé dans `docker-compose.yml` ; défaut n8n v2 = `true`) : requis pour lire `$env` — `true` bloque `$env` **partout** (Code nodes ET expressions, vérifié empiriquement, pas seulement les Code nodes). Voir `n8n/conventions.md §4.1`.
 
 **Backup critique** : `N8N_ENCRYPTION_KEY` — si perdue, tous les credentials n8n deviennent illisibles. Sauvegarder hors machine (password manager).
 

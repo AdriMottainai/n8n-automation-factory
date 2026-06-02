@@ -415,7 +415,7 @@ Depuis n8n v2.0, `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` est le défaut.
 
 **État de la factory (instance locale dev)** : `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` est appliqué **par choix assumé** (Mac M1, mono-utilisateur, localhost, pas de webhook public, Adrien seul auteur de workflows). C'est ce qui rend les conventions §4.2/§4.3 ci-dessous opérationnelles.
 
-**Pré-requis de graduation vers une instance prod** (= déclencheurs : instance dédiée prod, webhook public, multi-utilisateur, import de workflows tiers) : il faut alors `BLOCK=true` (défaut sécurisé), donc :
+**Pré-requis d'extraction vers une instance prod** (= déclencheurs : instance dédiée prod, webhook public, multi-utilisateur, import de workflows tiers) : il faut alors `BLOCK=true` (défaut sécurisé), donc :
 1. **Code nodes purs** : aucun `$env` en Code node → un node natif « Config » en tête lit la config et les Code nodes lisent `$('Config').first().json.x`.
 2. **Config hors `$env`** : sortir les constantes vers les **Variables UI n8n** ou des credentials typés (les deux axes — pureté Code node et compat `BLOCK=true` — sont orthogonaux).
 Effort estimé W1+W2 : ~3,5–4,5 h. Voir [[feedback_n8n_block_env_access]].
@@ -425,24 +425,23 @@ Effort estimé W1+W2 : ~3,5–4,5 h. Voir [[feedback_n8n_block_env_access]].
 **Toute** valeur dépendante de l'environnement sort du workflow et passe par `$env.PROJECT_KEY_NAME`. Préfixe **par projet/domaine**, jamais par usage technique.
 
 ```yaml
-# docker-compose.yml — section environment du service n8n
+# docker-compose.yml — anchor x-n8n, section environment (noms réels)
 environment:
-  # Factory-level (routing AI)
-  - AI_LOCAL_OLLAMA_URL=http://host.docker.internal:11434
-  - AI_CLOUD_OLLAMA_URL=https://ollama.com
-  - AI_LOCAL_MODEL=llama3.2:3b
-  - AI_COMPLEXITY_THRESHOLD=1500
-
-  # Infra partagée
+  # Infra factory (partagée, STABLE, ne voyage jamais)
+  - OLLAMA_LOCAL_URL=http://host.docker.internal:11434
+  - OLLAMA_CLOUD_URL=https://ollama.com
   - QDRANT_URL=http://qdrant:6333
+  - N8N_BLOCK_ENV_ACCESS_IN_NODE=false   # requis pour $env partout (cf. §4.1)
 
-  # Projet Veille Emploi
+  # Config-projet (préfixe <PROJ>_, reste en factory, voyage à l'archivage)
   - VEILLE_OUTPUT_DIR=/data/shared/veille-emploi
-  - VEILLE_TO_EMAIL=you@example.com
+  - "VEILLE_TO_EMAIL=${VEILLE_TO_EMAIL:?defined in .env}"
   - VEILLE_BATCH_MAX=40
-  - VEILLE_EXTRACT_MODEL_CLOUD=qwen3-coder:480b
   - VEILLE_EMBED_MODEL=bge-m3
+  - VEILLE_EXTRACT_MODEL_CLOUD=qwen3-coder:480b
 ```
+
+⚠️ Toute var référencée en `${...}` (ex. `VEILLE_TO_EMAIL`) **doit rester dans le `.env` racine** : le compose s'en sert aussi comme source d'interpolation au boot. La déplacer ailleurs casse le démarrage.
 
 Dans une expression node natif : `={{ $env.VEILLE_OUTPUT_DIR }}/{{ $now.toFormat('yyyy-MM-dd') }}.md`.
 
@@ -498,7 +497,7 @@ L'API publique `GET /api/v1/credentials` ne renvoie **jamais** les champs sensib
 **Règles** :
 1. **Définir explicitement** dans `~/.zshrc` AVANT le 1er `docker compose up` : `openssl rand -base64 42`
 2. **Backup hors machine** : password manager (1Password/Bitwarden) avec item dédié par instance
-3. **Une clé par instance distincte** (factory vs `~/projets/n8n/veille-emploi/` séparées)
+3. **Une clé par instance PHYSIQUE** : en solo M1 il n'y a qu'UNE instance (la factory) → une seule clé. Clé distincte seulement en cas d'EXTRACTION physique réelle vers une autre machine (rare).
 4. **Si perdue** : tous les credentials illisibles **définitivement**. Workflow tourne côté logique mais chaque node `credentials.id=...` plante à l'exécution. Seul remède : recréer chaque credential à la main.
 
 ### 4.7 Versioning git — Postgres = source of truth opérationnelle, Git = audit humain
@@ -526,14 +525,13 @@ L'API publique `GET /api/v1/credentials` ne renvoie **jamais** les champs sensib
 | API publique POST | CI/CD, scripts — nettoyer `id/active/createdAt/updatedAt/tags` avant POST, activation séparée via `POST .../activate` |
 | Source control intégré Enterprise (n8n v1.16+) | Repo Git lié, push/pull UI, unidirectionnel dev→prod |
 
-### 4.9 Graduation d'un projet hors factory
+### 4.9 Cycle de vie d'un projet : ARCHIVER (défaut) vs EXTRAIRE (exception)
 
-Voir CLAUDE.md "Factory structure → Graduation" pour la checklist complète. Résumé :
-1. Snapshots workflow JSON via API publique
-2. Snapshots Qdrant si pertinent
-3. `mv shared/<projet>` + `mv projets/<projet>` vers `~/projets/n8n/<projet>/`
-4. Déménager memory projet, retirer ligne de `MEMORY.md`
-5. Workflow continue à tourner dans la même instance n8n (Postgres garde tout)
+Voir CLAUDE.md "Cycle de vie" pour le détail. **Principe** : l'instance n8n est unique et permanente ; **on ne déplace JAMAIS un projet hors du repo** — déplacer `shared/<projet>` hors de `./shared/` casse le bind-mount → le workflow écrit dans le vide (split-brain).
+
+- **ARCHIVER** (défaut, projet stable ~2-3 sem) : snapshot JSON figé → `projets/<projet>/workflows/<id>.json` ; **retirer le bloc `## PROJECT:<nom>` de `MEMORY.md`** (le vrai levier de lisibilité) ; (option) `mv project_<nom>_*.md` vers archive mémoire. Le workflow continue de tourner. **Avant** : promouvoir toute leçon `durable` généralisable en `feedback_*` factory (sinon perdue avec le projet).
+- **Données** (`archiver ≠ purger`) : si l'automatisation est terminée (plus aucun run), snapshot Qdrant puis purge `shared/<projet>/inputs/`.
+- **EXTRAIRE** (exception rare, sur déclencheur EXTERNE seul : déploiement ailleurs / produit / isolation données client) : repo + instance n8n séparés, nouvelle `N8N_ENCRYPTION_KEY`. Jamais la maturité seule (8 Go ne tiennent pas 2× n8n + Ollama).
 
 ---
 

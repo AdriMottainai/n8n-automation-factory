@@ -32,7 +32,7 @@ x-n8n: &service-n8n
     - OLLAMA_LOCAL_URL=http://host.docker.internal:11434
     - OLLAMA_CLOUD_URL=https://ollama.com
     - QDRANT_URL=http://qdrant:6333
-    # --- Projet Veille Emploi (W1 feeds + W2 emails) ---
+    # --- Projet Veille Emploi (préfixe VEILLE_, reste en factory ; vars ${...} -> .env racine) ---
     - VEILLE_OUTPUT_DIR=/data/shared/veille-emploi
     - "VEILLE_TO_EMAIL=${VEILLE_TO_EMAIL:?defined in .env, see .env.example}"
     - VEILLE_BATCH_MAX=40
@@ -84,26 +84,6 @@ services:
       timeout: 5s
       retries: 10
 
-  n8n-import:
-    <<: *service-n8n
-    hostname: n8n-import
-    container_name: n8n-import
-    entrypoint: /bin/sh
-    command:
-    - "-c"
-    - |
-      if [ -z "$(n8n list:workflow --onlyId)" ]; then
-        n8n import:credentials --separate --input=/demo-data/credentials && \
-        n8n import:workflow --separate --input=/demo-data/workflows
-      else
-        echo "Workflows exist, skipping import"
-      fi
-    volumes:
-      - ./n8n/demo-data:/demo-data
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   n8n:
     <<: *service-n8n
     hostname: n8n
@@ -114,13 +94,10 @@ services:
       - 5678:5678
     volumes:
       - n8n_storage:/home/node/.n8n
-      - ./n8n/demo-data:/demo-data
       - ./shared:/data/shared
     depends_on:
       postgres:
         condition: service_healthy
-      n8n-import:
-        condition: service_completed_successfully
 
   qdrant:
     image: qdrant/qdrant
