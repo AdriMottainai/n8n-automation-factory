@@ -8,7 +8,7 @@ Quand tu démarres un nouveau workflow ou refactores un workflow existant, **lis
 
 ## Philosophie en 5 lignes
 
-1. **Local-first** : pas d'API payante (cf. CLAUDE.md). Ollama local par défaut, Cloud justifié uniquement.
+1. **Modèle adaptatif** : choisir local Ollama / Ollama Cloud / API payante **par besoin** (coût, puissance, confidentialité, latence, volume). Le local est un bon défaut quand rien ne le contredit — **pas une règle** (cf. CLAUDE.md « Choix du modèle »).
 2. **Aucune valeur métier hardcodée** : tout passe par `$env.X` ou est calculé.
 3. **Aucune exécution silencieuse** : `errorWorkflow` configuré + logs JSON sur stdout.
 4. **Aucune action irréversible sans clé d'idempotence** : gates Postgres/Qdrant/Remove Duplicates avant tout write/send.
@@ -689,9 +689,9 @@ N'alloue **pas** 25% de 8 GB à Postgres : Ollama a besoin de la RAM.
 
 ---
 
-## 6. Coût & efficacité (LOCAL-FIRST poussé)
+## 6. Coût & efficacité — arbitrer coût vs puissance (le local n'est qu'une option)
 
-### 6.1 Routage LLM par complexité (politique CLAUDE.md)
+### 6.1 Routage LLM par complexité (exemple ; le choix modèle/hébergement s'arbitre par besoin — cf. CLAUDE.md « Choix du modèle »)
 
 ```
 [Trigger] → [Compute complexity score]

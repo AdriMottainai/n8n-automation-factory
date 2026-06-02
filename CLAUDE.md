@@ -39,12 +39,26 @@ self-hosted-ai-starter-kit/             ← FACTORY
 
 ### Démarrer un nouveau projet
 
-0. **`public_ok` ?** (défaut **non**) — le projet pourra-t-il figurer dans un portfolio public ? Aujourd'hui la factory **est** le repo public (projets perso). Le jour où un projet est **pro/client/sensible**, on bascule vers **factory privée + repo portfolio public séparé** (cf. EXTRAIRE) ; l'utilisateur le signalera.
-1. `mkdir projets/<nom>/` (+ `shared/<nom>/` si le projet manipule des fichiers)
-2. `projets/<nom>/README.md` (front-matter `public_ok`, mission, IDs n8n, état)
-3. Project memory `project_<nom>_workflow.md` (`type: project`, `volatility: volatile`) + bloc `## PROJECT:<nom>` dans `MEMORY.md`
-4. Config-projet en env vars **préfixées `<PROJ>_`** dans `docker-compose.yml` (`environment:` inline). ⚠️ Toute var référencée en `${...}` dans le compose **doit rester dans `.env` racine** (interpolation au boot).
-5. Workflows dans n8n UI / n8n-mcp ; tous les paths des nodes pointent vers `/data/shared/<nom>/...`. Lire `n8n/conventions.md` avant de construire.
+**Brief — ce que l'utilisateur fournit** (le know-how n8n est DÉJÀ chargé : ce doc + `n8n/conventions.md` + mémoires factory ; l'utilisateur décrit juste l'automatisation) :
+- **But** en 1 phrase · **Déclencheur** (schedule / webhook / fichier déposé / email / manuel)
+- **Entrées** : sources + auth (API clé gratuite/OAuth/aucune ? RSS ? Gmail ? fichier `shared/` ? Postgres ?)
+- **Traitement** : filtrer / classifier / extraire JSON / résumer / matcher / scorer — **modèle choisi selon le besoin** (coût / puissance / confidentialité / latence ; local Ollama, Ollama Cloud, ou API payante — voir « Choix du modèle »)
+- **Sortie** : email / fichier `shared/<projet>/` / Slack / Postgres / Qdrant
+- **Réussite** : à quoi ressemble un bon résultat · **Volume/run** (batching + plafond Ollama)
+- **Contexte métier** : profil / préférences / mots-clés qui guident filtre & scoring · **`public_ok` ?** · **credentials déjà dispo**
+
+**Process (Claude) — dans l'ordre, dès qu'une automatisation est demandée :**
+
+0. **Vérifier l'env** : n8n up (`docker compose ps` / `curl localhost:5678/healthz`) + **n8n-mcp connecté** (présence des outils `n8n_*` / `search_nodes` ; au besoin `ToolSearch` "n8n"). → **Piloter n8n via les outils n8n-mcp, PAS l'API REST/curl.** Si MCP absent : le signaler + checklist « Si MCP ne se charge pas » (ci-dessous), proposer de le fixer **avant de coder** ; fallback REST seulement si l'utilisateur préfère avancer sans.
+1. **Brief** : récupérer le brief ci-dessus ; demander ce qui manque (surtout *Réussite* et *Contexte métier*).
+2. **Clarifier + concevoir** : reformuler le but, proposer l'**archi** (trigger → nodes → sortie), **choix du modèle** (arbitrer coût/puissance/confidentialité — voir « Choix du modèle »), sources/auth — **valider avec l'utilisateur avant de coder**.
+3. **✅ CHECKPOINT conventions — AVANT de coder** : lire `n8n/conventions.md` (§1 archi/naming, §2 robustesse, §4 exportabilité + la section du type de workflow visé). Objectif : concevoir juste du 1er coup (naming, Code node < 100 lignes, `errorWorkflow`, idempotency, env vars préfixées) — jamais construire sans avoir relu les conventions.
+4. **Créer les couloirs** : `mkdir projets/<nom>/` (+ `shared/<nom>/` si fichiers) ; `README.md` (front-matter `public_ok` défaut non, mission, IDs, état) ; project memory `project_<nom>_workflow.md` (`type: project`, `volatility: volatile`, `public_ok`) + bloc `## PROJECT:<nom>` dans `MEMORY.md`.
+5. **Build via n8n-mcp** : `search_templates` → `n8n_deploy_template`, ou `search_nodes` + `get_node_essentials`/`validate_node` + `n8n_create_workflow`. Config-projet en env vars **préfixées `<PROJ>_`** (`${...}` → `.env` racine) ; credentials via `n8n_manage_credentials`. Valider en boucle : `n8n_validate_workflow` / `n8n_autofix_workflow`. Paths des nodes → `/data/shared/<nom>/...`.
+6. **Tester sans casser** : sondes jetables (executeWorkflowTrigger + DELETE, cf. [[feedback_n8n_cli_execute_testing]]) pour $env/shapes/décodage ; puis l'utilisateur lance un **run UI** → j'analyse le funnel (volumes par étape + sortie).
+7. **Itérer** jusqu'au critère de *Réussite* du brief.
+8. **✅ CHECKPOINT conventions — FIN d'itérations** : repasser la « Checklist nouveau workflow » + « Anti-patterns à fuir » de `conventions.md`. Combler les manques (errorWorkflow, observabilité logs JSON, idempotency, timeouts) **avant** de déclarer le projet stable.
+9. Stabilité ~2-3 semaines → **ARCHIVER** (voir Cycle de vie).
 
 ### Cycle de vie : ARCHIVER (défaut) vs EXTRAIRE (exception)
 
@@ -118,22 +132,17 @@ Meme API, endpoint `https://ollama.com`. Modeles avec suffixe `:cloud` (liste : 
 
 Free tier : 1 modele concurrent, usage "light" (resets 5h/7j).
 
-## Politique de routage : LOCAL-FIRST, CLOUD-FALLBACK
+## Choix du modèle / routage — ADAPTATIF (rien n'est imposé)
 
-**Aucune API payante** (pas de Claude API, pas d'OpenAI). Tout passe par Ollama.
+Le modèle **et** l'hébergement se choisissent **par automatisation**, en arbitrant 5 axes : **coût · puissance/qualité · confidentialité (sensibilité des données) · latence · volume**. `llama3.2:3b` local n'est qu'un **défaut commode du setup actuel** (M1, coût 0, données privées) — **pas une règle**.
 
-**Niveau 1 — local (llama3.2:3b) par defaut** : classification, resume court, extraction JSON, RAG Q&A, templates, triage.
+| Option | Coût | Puissance | Confidentialité | Quand |
+|---|---|---|---|---|
+| **Ollama local** (`llama3.2:3b`…) | gratuit | faible (M1 = petits modèles, 1 à la fois) | max (rien ne sort) | simple, données sensibles, gros volume, hors-ligne |
+| **Ollama Cloud** (free tier, gros modèles) | gratuit (light) | élevée | données → Ollama | raisonnement long, code, gros docs, sans budget |
+| **API payante** (Claude, OpenAI…) | $ | max | données → fournisseur | quand la qualité justifie le coût **et** que la confidentialité l'autorise |
 
-**Niveau 2 — Cloud quand le local ne suffit pas** : raisonnement multi-etapes, generation longue (> 1000 mots), code (`qwen3-coder:cloud`), gros documents (> 4K tokens).
-
-**Dans n8n** : deux credentials Ollama (local + Cloud) + Switch node qui route selon la complexite. Le routage se fait par le Switch, pas par le credential.
-
-```
-[Trigger] → [Switch: complexite?]
-              ├── simple → Ollama Chat Model (local)
-              └── complexe → Ollama Chat Model (Cloud, :cloud)
-            → [Output]
-```
+**Règle** : à la conception, déduire/demander les contraintes du projet (budget ? données sensibles ? besoin de puissance ?) et choisir en conséquence. Local-first reste un bon défaut **quand rien ne le contredit**, mais une API payante est légitime si le besoin la justifie. **Dans n8n** : un Switch peut router selon la complexité ; un credential par fournisseur utilisé. Voir [[feedback_llm_model_choice_adaptive]].
 
 ## MCP
 
@@ -168,11 +177,9 @@ Context7 est en scope **user** (`~/.claude.json`), disponible dans tous les proj
 
 Si MCP ne se charge pas : verifier le trust dialog au premier lancement, que `$N8N_API_KEY` est dans l'env, que n8n tourne (`docker compose ps`).
 
-## Construire une automatisation
+## Patterns d'automatisation courants
 
-Process : décrire (skills `/deep-planning` + `/apex`) → template (`search_templates` / `n8n_deploy_template`) ou `n8n_generate_workflow` → `n8n_validate_workflow` → credentials → tester → `n8n_autofix_workflow` → activer. Conventions détaillées : `n8n/conventions.md`.
-
-### Patterns courants
+_(Le process complet est dans « Démarrer un nouveau projet » ci-dessus. Voici des archétypes de départ.)_
 
 **RAG local** : Local File Trigger (`/data/shared`) → chunk → embed (nomic-embed-text) → Qdrant. Chat Trigger → query Qdrant → llama3.2:3b.
 
