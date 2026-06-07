@@ -1,0 +1,688 @@
+{
+ "name": "Veille Emploi (daily)",
+ "nodes": [
+  {
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "cronExpression",
+       "expression": "0 9 * * 1-5"
+      }
+     ]
+    }
+   },
+   "id": "trigger-1",
+   "name": "Daily 9h",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.3,
+   "position": [
+    208,
+    664
+   ]
+  },
+  {
+   "parameters": {
+    "url": "https://remotive.com/api/remote-jobs?limit=100",
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "fetch-remotive",
+   "name": "Fetch Remotive",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    432,
+    208
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "url": "https://jobicy.com/api/v2/remote-jobs?tag=sales&count=100",
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "fetch-jobicy",
+   "name": "Fetch Jobicy",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    432,
+    400
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "url": "https://weworkremotely.com/categories/remote-sales-and-marketing-jobs.rss",
+    "options": {}
+   },
+   "id": "fetch-wwr",
+   "name": "Fetch WWR Sales",
+   "type": "n8n-nodes-base.rssFeedRead",
+   "typeVersion": 1.2,
+   "position": [
+    656,
+    848
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "numberInputs": 6
+   },
+   "id": "merge-apis",
+   "name": "Merge APIs",
+   "type": "n8n-nodes-base.merge",
+   "typeVersion": 3.2,
+   "position": [
+    656,
+    528
+   ]
+  },
+  {
+   "parameters": {},
+   "id": "merge-all",
+   "name": "Merge All",
+   "type": "n8n-nodes-base.merge",
+   "typeVersion": 3.2,
+   "position": [
+    880,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "const allJobs = [];\nfor (const item of $input.all()) {\n  const d = item.json;\n  if (d.error) continue;\n  if ('job-count' in d && d.jobs) {\n    for (const j of d.jobs) {\n      allJobs.push({\n        title: j.title || '',\n        company: j.company_name || '',\n        location: j.candidate_required_location || 'Remote',\n        url: j.url || '',\n        desc: (j.description || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').substring(0, 500),\n        type: j.job_type || '',\n        salary: j.salary || '',\n        source: 'Remotive',\n        date: j.publication_date || '',\n        cat: j.category || '',\n        tags: (j.tags || []).join(', ')\n      });\n    }\n  } else if (d.jobs && d.jobs[0] && d.jobs[0].jobTitle) {\n    for (const j of d.jobs) {\n      const salary = j.annualSalaryMin ? (j.annualSalaryMin + '-' + j.annualSalaryMax) : '';\n      allJobs.push({\n        title: j.jobTitle || '',\n        company: j.companyName || '',\n        location: j.jobGeo || 'Remote',\n        url: j.url || '',\n        desc: (j.jobExcerpt || '').replace(/<[^>]+>/g, ' ').substring(0, 500),\n        type: Array.isArray(j.jobType) ? j.jobType.join(', ') : '',\n        salary: salary,\n        source: 'Jobicy',\n        date: j.pubDate || '',\n        cat: Array.isArray(j.jobIndustry) ? j.jobIndustry.join(', ') : '',\n        tags: ''\n      });\n    }\n  } else if (Array.isArray(d.resultats)) {\n    for (const j of d.resultats) {\n      const company = (j.entreprise && j.entreprise.nom) || '';\n      const loc = (j.lieuTravail && j.lieuTravail.libelle) || 'France';\n      const url = (j.origineOffre && j.origineOffre.urlOrigine) || ('https://candidat.francetravail.fr/offres/recherche/detail/' + (j.id || ''));\n      const salary = (j.salaire && j.salaire.libelle) || '';\n      allJobs.push({\n        title: j.intitule || '',\n        company: company,\n        location: loc,\n        url: url,\n        desc: (j.description || '').replace(/\\s+/g, ' ').substring(0, 500),\n        type: j.typeContratLibelle || '',\n        salary: salary,\n        source: 'FranceTravail',\n        date: j.dateCreation || '',\n        cat: j.romeLibelle || j.romeCode || '',\n        tags: ''\n      });\n    }\n  } else if (d.title && d.link) {\n    const p = (d.title || '').split(':');\n    allJobs.push({\n      title: p.length > 1 ? p.slice(1).join(':').trim() : d.title,\n      company: p[0] ? p[0].trim() : '',\n      location: d.region || d.country || 'Remote',\n      url: d.link || '',\n      desc: (d.content || d.description || '').replace(/<[^>]+>/g, ' ').substring(0, 500),\n      type: 'Full-Time',\n      salary: '',\n      source: 'WWR',\n      date: d.pubDate || d.isoDate || '',\n      cat: 'Sales',\n      tags: ''\n    });\n  } else if ('totalCount' in d && Array.isArray(d.jobs)) {\n    for (const j of d.jobs) {\n      const locs = Array.isArray(j.locationRestrictions) ? j.locationRestrictions : [];\n      const loc = locs.length ? locs.join(', ') : 'Remote';\n      const sal = (j.minSalary && j.minSalary !== 'None') ? (j.minSalary + '-' + (j.maxSalary || '') + ' ' + (j.currency || '')) : '';\n      allJobs.push({\n        title: j.title || '', company: j.companyName || '', location: loc,\n        url: j.applicationLink || '',\n        desc: (j.description || j.excerpt || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').substring(0, 500),\n        type: j.employmentType || '', salary: sal, source: 'Himalayas',\n        date: j.pubDate ? new Date(Number(j.pubDate) * 1000).toISOString() : '',\n        cat: Array.isArray(j.categories) ? j.categories.join(', ') : '', tags: ''\n      });\n    }\n  } else if (Array.isArray(d.results)) {\n    for (const j of d.results) {\n      const loc = (j.locations && j.locations[0] && j.locations[0].name) || 'Remote';\n      allJobs.push({\n        title: j.name || '', company: (j.company && j.company.name) || '', location: loc,\n        url: (j.refs && j.refs.landing_page) || '',\n        desc: (j.contents || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').substring(0, 500),\n        type: j.type || '', salary: '', source: 'TheMuse',\n        date: j.publication_date || '',\n        cat: Array.isArray(j.categories) ? j.categories.map(c => c.name).join(', ') : '', tags: ''\n      });\n    }\n  } else if (d.position && (d.url || d.apply_url) && !d.legal) {\n    allJobs.push({\n      title: d.position || '', company: d.company || '', location: d.location || 'Remote',\n      url: d.url || d.apply_url || '',\n      desc: (d.description || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').substring(0, 500),\n      type: '', salary: (d.salary_min && String(d.salary_min) !== '0') ? (d.salary_min + '-' + d.salary_max) : '',\n      source: 'RemoteOK', date: d.date || '', cat: '',\n      tags: Array.isArray(d.tags) ? d.tags.join(', ') : ''\n    });\n  }\n}\n\nconst INCLUDE = [\"account executive\", \"enterprise account executive\", \"strategic account executive\", \"mid-market account executive\", \"smb account executive\", \"account manager\", \"key account manager\", \"named account manager\", \"strategic account manager\", \"account director\", \"account management\", \"revenue operations\", \"revops\", \"rev ops\", \"sales operations\", \"sales ops\", \"gtm operations\", \"gtm ops\", \"go-to-market operations\", \"growth operations\", \"growth ops\", \"outbound sales\", \"outbound operations\", \"business development\", \"business developer\", \"partnerships\", \"partner manager\", \"alliances\", \"customer success manager\", \"sales manager\", \"ingenieur d'affaires\", \"charge d'affaires\", \"charge de developpement commercial\", \"responsable grands comptes\", \"responsable comptes cles\", \"gestionnaire grands comptes\"];\nconst EXCLUDE = [\"head of sales\", \"vp sales\", \"vp of sales\", \"vice president of sales\", \"svp sales\", \"chief revenue officer\", \"chief sales officer\", \"directeur commercial\", \"directrice commerciale\", \"directeur des ventes\", \"sales director\", \"technico-commercial\", \"technico commercial\", \"commercial terrain\", \"commercial sedentaire\", \"commercial itinerant\", \"vendeur\", \"vendeuse\", \"televente\", \"teleconseiller\", \"teleprospecteur\", \"porte-a-porte\", \"vrp\", \"agent commercial\", \"agent general\", \"assurance\", \"assureur\", \"mutuelle\", \"prevoyance\", \"courtier\", \"immobilier\", \"btp\", \"batiment\", \"menuiserie\", \"fenetre\", \"isolation\", \"photovoltaique\", \"panneaux solaires\", \"automobile\", \"concession\", \"grande distribution\", \"pompes funebres\", \"sales engineer\", \"sales engineering\", \"presales\", \"pre-sales\", \"avant-vente\", \"sales development\", \"sdr\", \"salesforce\", \"recruteur\", \"recruitment\", \"talent acquisition\", \"stage\", \"alternance\", \"apprentissage\", \"stagiaire\"];\nconst L = [\"remote\", \"fully remote\", \"full remote\", \"remote-first\", \"remote france\", \"remote europe\", \"eu remote\", \"wfh\", \"work from home\", \"distributed\", \"anywhere\", \"worldwide\", \"teletravail\", \"distanciel\", \"hybrid\", \"hybride\", \"france\", \"nantes\", \"toulouse\", \"lyon\", \"paris\", \"bordeaux\", \"lille\", \"rennes\", \"nice\", \"montpellier\", \"marseille\", \"strasbourg\", \"nouvelle-aquitaine\", \"ile-de-france\", \"europe\", \"emea\", \"global\"];\nconst VAGUE_LOC = ['', 'unknown', 'not specified', 'n/a', 'na', 'none', '?', '-'];\nconst deburr = s => (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');\n\nconst filtered = (typeof allJobs !== 'undefined' ? allJobs : jobs).filter(j => {\n  const title = deburr(j.title);\n  const hay = deburr((j.title || '') + ' ' + (j.desc || ''));\n  if (EXCLUDE.some(k => title.indexOf(k) >= 0)) return false;\n  const roleMatch = INCLUDE.some(k => title.indexOf(k) >= 0);\n  const loc = deburr(j.location).trim();\n  const locationMatch = L.some(k => loc.indexOf(k) >= 0) || VAGUE_LOC.indexOf(loc) >= 0;\n  return roleMatch && locationMatch;\n});\n\nconst seen = new Set();\nconst unique = filtered.filter(j => {\n  const k = (j.title + '_' + j.company).toLowerCase();\n  if (seen.has(k)) return false;\n  seen.add(k);\n  return true;\n});\n\nunique.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));\nreturn unique.map(j => ({ json: j }));\n"
+   },
+   "id": "normalize-filter",
+   "name": "Normalize & Filter",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1104,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "const items = $input.all().map(i => i.json);\n\nif (items.length === 1 && items[0]._no_new_jobs) {\n  return [{ json: {\n    _no_new_jobs: true,\n    _stats: items[0]._stats || {},\n    jobs: [],\n    jobsCount: 0,\n    requestBody: {\n      model: $env.VEILLE_SCORE_MODEL_LOCAL,\n      messages: [\n        { role: 'system', content: 'Reply only with JSON.' },\n        { role: 'user', content: 'Output exactly: {\"scores\":[]}' }\n      ],\n      stream: false,\n      format: 'json',\n      options: { temperature: 0 }\n    }\n  } }];\n}\n\nconst MAX = parseInt($env.VEILLE_BATCH_MAX, 10) || 40;\nconst batch = items.slice(0, MAX);\n\nlet jobsText = '';\nfor (let i = 0; i < batch.length; i++) {\n  const j = batch[i];\n  jobsText += (i+1) + '. ' + j.title + ' @ ' + j.company + ' (' + j.location + ')\\n';\n  jobsText += 'Source: ' + j.source + ' | URL: ' + j.url + '\\n';\n  jobsText += 'Desc: ' + (j.desc || '').substring(0, 300) + '\\n';\n  jobsText += 'Match CV (0-1): ' + (typeof j._cv_score === 'number' ? j._cv_score.toFixed(2) : 'n/a') + '\\n\\n';\n}\n\nconst sys = 'Tu es un assistant de veille emploi pour un candidat base a Bordeaux (France), qui recherche surtout du REMOTE. Profil cible: Account Executive, Account Manager / Key Account, Revenue Operations, Sales Ops, GTM Ops, Outbound/Growth Ops, Business Development. Secteurs prioritaires: crypto/web3/fintech, foodtech, AI/ML, SaaS. NON cible (score bas): postes trop seniors (Head of Sales, VP, Director, CRO), technico-commercial, assurance, immobilier, BTP, vente terrain. Un champ Match CV (0-1) est fourni par offre: plus il est eleve, plus l adequation au profil du candidat est forte; pondere le score en consequence. Reponds UNIQUEMENT en JSON valide.';\n\nconst usr = 'Voici ' + batch.length + ' offres.\\n\\nRegles de scoring:\\n- 8-10: secteur prioritaire (crypto/fintech/food/AI) ET role commercial senior ET location France ou remote EMEA\\n- 5-7: 2 criteres sur 3 OK\\n- 0-4: hors scope (role technique/junior, secteur non prioritaire, location non accessible)\\n\\nIMPORTANT: la raison doit etre SPECIFIQUE a l offre (mentionne le nom de l entreprise ou le produit ou un point concret du poste). INTERDIT: raisons generiques repetees comme \"Data et AI, DevSecOps\". Max 15 mots.\\n\\nFormat: { \"scores\": [ { \"n\": 1, \"score\": 8, \"class\": \"top\", \"reason\": \"...\" } ] }\\nclass: top si >=7, watch si 4-6, skip si <4.\\n\\nOffres:\\n' + jobsText;\n\nconst msgs = [\n  { role: 'system', content: sys },\n  { role: 'user', content: usr }\n];\n\nconst opts = { temperature: 0.3 };\nconst requestBody = { model: $env.VEILLE_SCORE_MODEL_LOCAL, messages: msgs, stream: false, format: 'json', options: opts };\n\nconst out = { requestBody: requestBody, jobs: batch, jobsCount: batch.length };\nreturn [{ json: out }];\n"
+   },
+   "id": "prepare-scoring",
+   "name": "Prepare Scoring",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1776,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $env.OLLAMA_LOCAL_URL }}/api/chat",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+    "options": {
+     "timeout": 300000
+    }
+   },
+   "id": "score-llm",
+   "name": "Score LLM",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    2000,
+    720
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 5000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "jsCode": "const llm = $input.first().json;\nconst preparedJson = $('Prepare Scoring').first().json || {};\nconst preparedJobs = preparedJson.jobs || [];\nconst noNew = !!preparedJson._no_new_jobs;\nconst stats = preparedJson._stats || {};\n\nconst today = new Date().toISOString().substring(0, 10);\nconst TO_EMAIL = $env.VEILLE_TO_EMAIL;\n\nfunction esc(s) {\n  return String(s == null ? '' : s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;');\n}\nfunction fmtCv(j) {\n  if (j._cv_score === undefined || j._cv_score === null) return '';\n  return ' | CV ' + j._cv_score.toFixed(2);\n}\nfunction htmlShell(title, bodyInner) {\n  return '<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2328;\">'\n    + '<div style=\"max-width:680px;margin:0 auto;padding:24px;\">'\n    + '<h1 style=\"font-size:20px;margin:0 0 16px;\">' + title + '</h1>'\n    + bodyInner\n    + '<hr style=\"border:0;border-top:1px solid #e1e4e8;margin:24px 0;\">'\n    + '<div style=\"font-size:12px;color:#6a737d;\">Veille Emploi · self-hosted-ai-starter-kit · ' + esc(today) + '</div>'\n    + '</div></body></html>';\n}\nfunction jobCard(j) {\n  const score = j.score || 0;\n  const cv = (j._cv_score != null) ? j._cv_score.toFixed(2) : null;\n  const badge = '<span style=\"display:inline-block;background:#0969da;color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\">' + score + '/10</span>';\n  const cvBadge = cv ? ' <span style=\"display:inline-block;background:#ddf4ff;color:#0969da;border-radius:4px;padding:2px 8px;font-size:12px;\">CV ' + esc(cv) + '</span>' : '';\n  let cvTop = '';\n  if (j._cv_top && j._cv_top.length > 0) {\n    const sec = j._cv_top.map(t => esc(t.section) + ' (' + t.score.toFixed(2) + ')').join(', ');\n    cvTop = '<div style=\"font-size:12px;color:#6a737d;margin-top:4px;\">CV match: ' + sec + '</div>';\n  }\n  return '<div style=\"border:1px solid #e1e4e8;border-radius:8px;padding:16px;margin-bottom:12px;background:#fff;\">'\n    + '<div style=\"margin-bottom:8px;\">' + badge + cvBadge + '</div>'\n    + '<div style=\"font-size:16px;font-weight:600;margin-bottom:4px;\">' + esc(j.title) + '</div>'\n    + '<div style=\"font-size:14px;color:#57606a;margin-bottom:8px;\">' + esc(j.company) + ' · ' + esc(j.location) + ' · <span style=\"color:#8b949e;\">' + esc(j.source) + '</span></div>'\n    + '<div style=\"font-size:13px;color:#24292f;margin-bottom:10px;\"><em>' + esc(j.reason) + '</em></div>'\n    + (j.salary ? '<div style=\"font-size:13px;margin-bottom:8px;\">Salary: ' + esc(j.salary) + '</div>' : '')\n    + cvTop\n    + '<a href=\"' + esc(j.url) + '\" style=\"display:inline-block;margin-top:10px;background:#1f883d;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;\">Voir l offre &rarr;</a>'\n    + '</div>';\n}\nfunction watchLine(j) {\n  const cv = (j._cv_score != null) ? ' · CV ' + j._cv_score.toFixed(2) : '';\n  return '<li style=\"margin-bottom:6px;font-size:13px;\">'\n    + '<strong>' + (j.score || 0) + '/10</strong>' + cv + ' · '\n    + '<a href=\"' + esc(j.url) + '\" style=\"color:#0969da;text-decoration:none;\">' + esc(j.title) + '</a> '\n    + '<span style=\"color:#57606a;\">@ ' + esc(j.company) + ' — ' + esc(j.location) + '</span> '\n    + '<em style=\"color:#6a737d;\">' + esc(j.reason) + '</em>'\n    + '</li>';\n}\n\nfunction buildOutput(payload) {\n  const filePath = $env.VEILLE_OUTPUT_DIR + '/jobs/' + today + '.md';\n  const base64 = Buffer.from(payload.md, 'utf-8').toString('base64');\n  const binaryData = { data: base64, mimeType: 'text/markdown', fileName: today + '.md', fileExtension: 'md' };\n  return [{\n    json: {\n      filePath: filePath,\n      count: payload.count,\n      topCount: payload.topCount,\n      watchCount: payload.watchCount,\n      mode: payload.mode,\n      errorMsg: payload.errorMsg || '',\n      subject: payload.subject,\n      html: payload.html,\n      to: TO_EMAIL,\n      stats: stats\n    },\n    binary: { data: binaryData }\n  }];\n}\n\nif (noNew) {\n  let md = '# Veille Emploi — ' + today + '\\n\\n';\n  md += '_Aucune nouvelle offre — toutes les offres collectees etaient deja indexees._\\n\\n';\n  md += '## Stats collecte\\n\\n';\n  md += '- Collectees apres normalisation: ' + (stats.input || 0) + '\\n';\n  md += '- Deja vues (dedup): ' + (stats.existing || 0) + '\\n';\n  md += '- Embed echec: ' + (stats.embedFailed || 0) + '\\n';\n  const subject = '[Veille Emploi] ' + today + ' — 0 nouvelle offre';\n  const inner = '<p style=\"font-size:14px;color:#57606a;\">Aucune nouvelle offre — toutes les offres collectees etaient deja indexees.</p>'\n    + '<h3 style=\"font-size:14px;margin-top:24px;\">Stats collecte</h3>'\n    + '<ul style=\"font-size:13px;color:#24292f;\"><li>Collectees: ' + (stats.input || 0) + '</li>'\n    + '<li>Deja vues (dedup): ' + (stats.existing || 0) + '</li>'\n    + '<li>Embed echec: ' + (stats.embedFailed || 0) + '</li></ul>';\n  return buildOutput({ md, count: 0, topCount: 0, watchCount: 0, mode: 'NO_NEW', subject, html: htmlShell('Veille Emploi — ' + today, inner) });\n}\n\nlet mode = 'OK';\nlet errorMsg = '';\nlet scores = [];\nconst llmError = llm && llm.error;\nconst content = llm && llm.message && llm.message.content ? llm.message.content : '';\n\nif (llmError) {\n  mode = 'FAILED';\n  errorMsg = (llmError.message || llmError.code || 'unknown error');\n} else if (!content) {\n  mode = 'DEGRADED';\n  errorMsg = 'LLM returned empty content';\n} else {\n  try {\n    const parsed = typeof content === 'string' ? JSON.parse(content) : content;\n    scores = parsed.scores || [];\n    if (!Array.isArray(scores) || scores.length === 0) {\n      mode = 'DEGRADED';\n      errorMsg = 'LLM output parsed but contained no scores';\n    }\n  } catch (e) {\n    mode = 'DEGRADED';\n    errorMsg = 'JSON parse failed: ' + e.message;\n  }\n}\n\nconst scored = preparedJobs.map((j, i) => {\n  const found = scores.find(x => Number(x.n) === (i+1));\n  const score = found ? (found.score || 0) : 0;\n  const klass = found ? (found.class || 'skip') : 'skip';\n  const reason = found ? (found.reason || '') : 'non score';\n  return Object.assign({}, j, { score: score, klass: klass, reason: reason });\n});\n\nfunction sortByScore(a, b) {\n  if (b.score !== a.score) return b.score - a.score;\n  return (b._cv_score || 0) - (a._cv_score || 0);\n}\n\nconst top = scored.filter(j => j.klass === 'top').sort(sortByScore);\nconst watch = scored.filter(j => j.klass === 'watch').sort(sortByScore);\n\nlet md = '# Veille Emploi — ' + today + '\\n\\n';\nlet inner = '';\nlet subject = '';\n\nif (mode !== 'OK') {\n  md += '> Pipeline ' + mode + ' — ' + errorMsg + '\\n';\n  md += '> ' + preparedJobs.length + ' offres collectees, scoring indisponible.\\n\\n';\n  md += '## Offres collectees (brut, non scorees)\\n\\n';\n  for (const j of preparedJobs) {\n    md += '- [' + (j.title || 'sans titre') + '](' + (j.url || '') + ') @ ' + (j.company || '?') + ' — ' + (j.location || '?') + ' _(source: ' + (j.source || '?') + fmtCv(j) + ')_\\n';\n  }\n  subject = '[Veille Emploi] ' + today + ' — PIPELINE ' + mode + ' (' + preparedJobs.length + ' offres brutes)';\n  inner = '<div style=\"background:#ffebe9;border:1px solid #ff8182;border-radius:6px;padding:12px;margin-bottom:16px;\">'\n    + '<strong style=\"color:#d1242f;\">Pipeline ' + mode + '</strong><br>'\n    + '<span style=\"font-size:13px;color:#57606a;\">' + esc(errorMsg) + '</span><br>'\n    + '<span style=\"font-size:13px;color:#57606a;\">' + preparedJobs.length + ' offres collectees, scoring indisponible.</span>'\n    + '</div>';\n  inner += '<h3 style=\"font-size:14px;\">Offres collectees (brut)</h3><ul style=\"font-size:13px;\">';\n  for (const j of preparedJobs) {\n    inner += '<li style=\"margin-bottom:4px;\"><a href=\"' + esc(j.url) + '\" style=\"color:#0969da;text-decoration:none;\">' + esc(j.title || 'sans titre') + '</a> @ ' + esc(j.company || '?') + ' — ' + esc(j.location || '?') + ' <span style=\"color:#8b949e;\">(' + esc(j.source || '?') + ')</span></li>';\n  }\n  inner += '</ul>';\n} else {\n  md += '_' + scored.length + ' nouvelles offres analysees — ' + top.length + ' top, ' + watch.length + ' a suivre_\\n\\n';\n  md += '## Top (score >= 7)\\n\\n';\n  if (top.length === 0) md += '_Aucune offre top aujourd hui._\\n\\n';\n  for (const j of top) {\n    md += '### [' + j.score + '/10' + fmtCv(j) + '] ' + j.title + ' — ' + j.company + '\\n';\n    md += '- Location: ' + j.location + '\\n';\n    md += '- Source: ' + j.source + '\\n';\n    md += '- URL: ' + j.url + '\\n';\n    md += '- Raison: ' + j.reason + '\\n';\n    if (j._cv_top && j._cv_top.length > 0) {\n      const topSec = j._cv_top.map(t => t.section + ' (' + t.score.toFixed(2) + ')').join(', ');\n      md += '- CV match: ' + topSec + '\\n';\n    }\n    if (j.salary) md += '- Salary: ' + j.salary + '\\n';\n    md += '\\n';\n  }\n  md += '## A suivre (4-6)\\n\\n';\n  if (watch.length === 0) md += '_Aucune offre a suivre._\\n\\n';\n  for (const j of watch) {\n    md += '- [' + j.score + '/10' + fmtCv(j) + '] [' + j.title + '](' + j.url + ') @ ' + j.company + ' — ' + j.location + ' — _' + j.reason + '_\\n';\n  }\n\n  if (top.length === 0 && watch.length === 0) {\n    subject = '[Veille Emploi] ' + today + ' — ' + scored.length + ' offres analysees, aucune retenue';\n  } else if (top.length === 0) {\n    subject = '[Veille Emploi] ' + today + ' — ' + watch.length + ' a suivre (pas de top)';\n  } else {\n    subject = '[Veille Emploi] ' + today + ' — ' + top.length + ' top + ' + watch.length + ' a suivre';\n  }\n\n  inner = '<div style=\"font-size:13px;color:#57606a;margin-bottom:16px;\">' + scored.length + ' nouvelles offres analysees — <strong>' + top.length + ' top</strong>, ' + watch.length + ' a suivre</div>';\n  inner += '<h2 style=\"font-size:16px;margin:24px 0 12px;\">Top (score &ge; 7)</h2>';\n  if (top.length === 0) {\n    inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre top aujourd hui.</em></p>';\n  } else {\n    for (const j of top) inner += jobCard(j);\n  }\n  inner += '<h2 style=\"font-size:16px;margin:24px 0 12px;\">A suivre (4-6)</h2>';\n  if (watch.length === 0) {\n    inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre a suivre.</em></p>';\n  } else {\n    inner += '<ul style=\"padding-left:20px;\">';\n    for (const j of watch) inner += watchLine(j);\n    inner += '</ul>';\n  }\n}\n\nreturn buildOutput({\n  md,\n  count: scored.length,\n  topCount: top.length,\n  watchCount: watch.length,\n  mode,\n  errorMsg,\n  subject,\n  html: htmlShell('Veille Emploi — ' + today, inner)\n});\n"
+   },
+   "id": "format-digest",
+   "name": "Format Digest",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    2224,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "operation": "write",
+    "fileName": "={{ $json.filePath }}",
+    "options": {}
+   },
+   "id": "save-digest",
+   "name": "Save Digest",
+   "type": "n8n-nodes-base.readWriteFile",
+   "typeVersion": 1.1,
+   "position": [
+    2448,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "const items = $input.all().map(i => i.json);\nconst QDRANT = $env.QDRANT_URL;\nconst OLLAMA = $env.OLLAMA_LOCAL_URL;\nconst COLL = 'job_listings';\nconst EMBED_MODEL = $env.VEILLE_EMBED_MODEL;\n\nfunction urlToId(url) {\n  let hash = 14695981039346656037n;\n  for (let i = 0; i < url.length; i++) {\n    hash ^= BigInt(url.charCodeAt(i));\n    hash = (hash * 1099511628211n) & 0x1FFFFFFFFFFFFFn;\n  }\n  return Number(hash);\n}\n\n// Probe helpers availability\nconst helpersInfo = {\n  hasDollarHelpers: typeof $helpers !== 'undefined',\n  hasThisHelpers: typeof this !== 'undefined' && this && typeof this.helpers !== 'undefined',\n};\n\nasync function httpJSON(opts) {\n  if (typeof $helpers !== 'undefined' && $helpers.httpRequest) return $helpers.httpRequest(opts);\n  if (typeof this !== 'undefined' && this && this.helpers && this.helpers.httpRequest) return this.helpers.httpRequest(opts);\n  throw new Error('no http helper available');\n}\n\nconst newItems = [];\nconst upsertPoints = [];\nlet stats = { input: items.length, existing: 0, embedded: 0, embedFailed: 0, indexed: 0, lastScrollErr: '', lastEmbedErr: '', lastUpsertErr: '', helpersInfo: helpersInfo };\n\nfor (const it of items) {\n  if (!it || !it.url) continue;\n\n  const id = urlToId(it.url);\n  let exists = false;\n  try {\n    const r = await httpJSON({\n      method: 'POST',\n      url: QDRANT + '/collections/' + COLL + '/points/scroll',\n      body: { filter: { must: [{ key: 'url', match: { value: it.url } }] }, limit: 1, with_payload: false, with_vector: false },\n      json: true\n    });\n    exists = (r && r.result && Array.isArray(r.result.points) && r.result.points.length > 0);\n  } catch (e) {\n    stats.lastScrollErr = (e && e.message) || String(e);\n    exists = false;\n  }\n  if (exists) { stats.existing++; continue; }\n\n  const text = (it.title || '') + ' chez ' + (it.company || '') + ' a ' + (it.location || '') + '. ' + (it.desc || '');\n  let embedding = null;\n  try {\n    const er = await httpJSON({\n      method: 'POST',\n      url: OLLAMA + '/api/embeddings',\n      body: { model: EMBED_MODEL, prompt: text.substring(0, 2000) },\n      json: true,\n      timeout: 60000\n    });\n    embedding = er && er.embedding;\n  } catch (e) {\n    stats.embedFailed++;\n    stats.lastEmbedErr = (e && e.message) || String(e);\n    continue;\n  }\n  if (!embedding || embedding.length !== 1024) {\n    stats.embedFailed++;\n    stats.lastEmbedErr = 'embedding shape invalid: len=' + (embedding ? embedding.length : 'null');\n    continue;\n  }\n  stats.embedded++;\n\n  const today = new Date().toISOString().substring(0, 10);\n  upsertPoints.push({\n    id: id,\n    vector: embedding,\n    payload: {\n      url: it.url,\n      title: it.title || '',\n      company: it.company || '',\n      source: it.source || '',\n      location: it.location || '',\n      date_collected: today\n    }\n  });\n\n  newItems.push(Object.assign({}, it, { _embedding: embedding, _qdrant_id: id }));\n}\n\n// Upsert DEFERRED to post-send 'Index New Jobs' node (idempotency: mark seen ONLY after successful email delivery).\nstats.indexed = -1; // -1 = deferred to post-send\n\nif (newItems.length === 0) {\n  return [{ json: { _no_new_jobs: true, _stats: stats } }];\n}\n\nreturn newItems.map(j => ({ json: Object.assign({}, j, { _stats: stats }) }));\n"
+   },
+   "id": "dedup-embed-index-1",
+   "name": "Dedup + Embed",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1328,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "const QDRANT = $env.QDRANT_URL;\nconst COLL = 'cv_profile';\nconst items = $input.all().map(i => i.json);\n\nif (items.length === 1 && items[0]._no_new_jobs) {\n  return [{ json: items[0] }];\n}\n\nconst out = [];\nfor (const it of items) {\n  if (!it._embedding) {\n    out.push({ json: it });\n    continue;\n  }\n  let cv_score = 0;\n  let cv_top = [];\n  try {\n    const r = await this.helpers.httpRequest({\n      method: 'POST',\n      url: QDRANT + '/collections/' + COLL + '/points/search',\n      body: { vector: it._embedding, limit: 3, with_payload: true },\n      json: true\n    });\n    const points = (r && r.result) || [];\n    if (points.length > 0) {\n      cv_score = points.reduce((a, p) => a + (p.score || 0), 0) / points.length;\n      cv_top = points.map(p => ({\n        section: ((p.payload || {}).metadata || {}).section || '?',\n        score: p.score\n      }));\n    }\n  } catch (e) {\n    // best-effort, leave cv_score at 0\n  }\n  const passed = Object.assign({}, it, { _cv_score: cv_score, _cv_top: cv_top });\n  delete passed._embedding;\n  out.push({ json: passed });\n}\n\nreturn out;\n"
+   },
+   "id": "match-cv-1",
+   "name": "Match CV",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1552,
+    720
+   ]
+  },
+  {
+   "parameters": {
+    "url": "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "oAuth2Api",
+    "sendQuery": true,
+    "queryParameters": {
+     "parameters": [
+      {
+       "name": "motsCles",
+       "value": "commercial"
+      },
+      {
+       "name": "range",
+       "value": "0-149"
+      }
+     ]
+    },
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "fetch-france-travail-1",
+   "name": "Fetch France Travail",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    432,
+    592
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "credentials": {
+    "oAuth2Api": {
+     "id": "Yo8nsirIWVrRA5If",
+     "name": "France Travail OAuth2"
+    }
+   },
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "sendTo": "={{ $json.to }}",
+    "subject": "={{ $json.subject }}",
+    "message": "={{ $json.html }}",
+    "options": {
+     "appendAttribution": false
+    }
+   },
+   "id": "send-digest-email",
+   "name": "Send Digest Email",
+   "type": "n8n-nodes-base.gmail",
+   "typeVersion": 2.1,
+   "position": [
+    2672,
+    720
+   ],
+   "webhookId": "857ca7e1-1d9a-44d2-9d59-41dbae31ac9f",
+   "credentials": {
+    "gmailOAuth2": {
+     "id": "YVA0CrdAF8TfHKS8",
+     "name": "Gmail account veille emploi"
+    }
+   }
+  },
+  {
+   "parameters": {
+    "url": "https://himalayas.app/jobs/api/search?q=sales&limit=50",
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "node-fetch-himalayas",
+   "name": "Fetch Himalayas",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    432,
+    936
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "url": "https://www.themuse.com/api/public/jobs?category=Sales&page=0",
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "node-fetch-the-muse",
+   "name": "Fetch The Muse",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    432,
+    1128
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "url": "https://remoteok.com/api",
+    "sendHeaders": true,
+    "headerParameters": {
+     "parameters": [
+      {
+       "name": "User-Agent",
+       "value": "Mozilla/5.0 (veille-emploi n8n)"
+      }
+     ]
+    },
+    "options": {
+     "timeout": 30000
+    }
+   },
+   "id": "node-fetch-remoteok",
+   "name": "Fetch RemoteOK",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.4,
+   "position": [
+    432,
+    1320
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000,
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "jsCode": "const QDRANT = $env.QDRANT_URL;\nconst COLL = 'job_listings';\nlet src;\ntry {\n  src = $('Dedup + Embed').all().map(i => i.json);\n} catch (e) {\n  return [{ json: { _indexed: 0, _index_error: 'cannot read Dedup + Embed: ' + String(e && e.message || e) } }];\n}\nconst today = new Date().toISOString().substring(0, 10);\nconst points = [];\nfor (const it of src) {\n  if (!it || it._no_new_jobs) continue;\n  if (!Array.isArray(it._embedding) || it._embedding.length !== 1024 || !it._qdrant_id) continue;\n  points.push({\n    id: it._qdrant_id,\n    vector: it._embedding,\n    payload: { url: it.url, title: it.title || '', company: it.company || '', source: it.source || '', location: it.location || '', date_collected: today }\n  });\n}\nif (points.length === 0) return [{ json: { _indexed: 0, _note: 'no new points to index' } }];\ntry {\n  await this.helpers.httpRequest({ method: 'PUT', url: QDRANT + '/collections/' + COLL + '/points', body: { points }, json: true, timeout: 30000 });\n  return [{ json: { _indexed: points.length } }];\n} catch (e) {\n  return [{ json: { _indexed: 0, _index_error: String(e && e.message || e) } }];\n}"
+   },
+   "id": "index-new-jobs",
+   "name": "Index New Jobs",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    2896,
+    720
+   ]
+  },
+  {
+   "id": "log-failed-sources",
+   "name": "Log Failed Sources",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    656,
+    788
+   ],
+   "parameters": {
+    "mode": "runOnceForAllItems",
+    "jsCode": "const items = $input.all();\nif (!items.length) return [];\nconst ts = new Date().toISOString();\nconst MAP = { remotive:'Remotive', jobicy:'Jobicy', weworkremotely:'WWR', wwr:'WWR', 'francetravail':'France Travail', 'pole-emploi':'France Travail', himalayas:'Himalayas', themuse:'The Muse', 'themuse.com':'The Muse', remoteok:'RemoteOK' };\nfunction guess(msg){ const m=String(msg||'').toLowerCase(); for (const k in MAP) if (m.includes(k)) return MAP[k]; return 'unknown'; }\nconst failures = items.map(it => {\n  const e = (it.json && it.json.error) || it.json || {};\n  const msg = e.message || e.description || (typeof e==='string'?e:JSON.stringify(e).slice(0,300));\n  return { source: guess(msg), message: String(msg).slice(0,300) };\n});\nconst record = { ts, level:'warn', workflow: $workflow.name, exec: $execution.id, event:'source_fetch_failed', failed_count: failures.length, failures };\nconst stamp = ts.replace(/[:.]/g,'-').slice(0,19);\nconst filePath = $env.VEILLE_OUTPUT_DIR + '/_errors/sources_' + stamp + '.json';\nconst base64 = Buffer.from(JSON.stringify(record, null, 2), 'utf-8').toString('base64');\nreturn [{ json: { filePath, ...record }, binary: { data: { data: base64, mimeType:'application/json', fileName:'sources_'+stamp+'.json', fileExtension:'json' } } }];"
+   }
+  },
+  {
+   "id": "write-sources-log",
+   "name": "Write Sources Log",
+   "type": "n8n-nodes-base.readWriteFile",
+   "typeVersion": 1.1,
+   "position": [
+    876,
+    788
+   ],
+   "parameters": {
+    "operation": "write",
+    "fileName": "={{ $json.filePath }}",
+    "dataPropertyName": "data",
+    "options": {}
+   },
+   "onError": "continueRegularOutput"
+  }
+ ],
+ "connections": {
+  "Daily 9h": {
+   "main": [
+    [
+     {
+      "node": "Fetch Remotive",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch Jobicy",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch WWR Sales",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch France Travail",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch Himalayas",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch The Muse",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Fetch RemoteOK",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch Remotive": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch Jobicy": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 1
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Merge APIs": {
+   "main": [
+    [
+     {
+      "node": "Merge All",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch WWR Sales": {
+   "main": [
+    [
+     {
+      "node": "Merge All",
+      "type": "main",
+      "index": 1
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Merge All": {
+   "main": [
+    [
+     {
+      "node": "Normalize & Filter",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Normalize & Filter": {
+   "main": [
+    [
+     {
+      "node": "Dedup + Embed",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Prepare Scoring": {
+   "main": [
+    [
+     {
+      "node": "Score LLM",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Score LLM": {
+   "main": [
+    [
+     {
+      "node": "Format Digest",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Format Digest": {
+   "main": [
+    [
+     {
+      "node": "Save Digest",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Match CV": {
+   "main": [
+    [
+     {
+      "node": "Prepare Scoring",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch France Travail": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 2
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Save Digest": {
+   "main": [
+    [
+     {
+      "node": "Send Digest Email",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch Himalayas": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 3
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch The Muse": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 4
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch RemoteOK": {
+   "main": [
+    [
+     {
+      "node": "Merge APIs",
+      "type": "main",
+      "index": 5
+     }
+    ],
+    [
+     {
+      "node": "Log Failed Sources",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Dedup + Embed": {
+   "main": [
+    [
+     {
+      "node": "Match CV",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Send Digest Email": {
+   "main": [
+    [
+     {
+      "node": "Index New Jobs",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Log Failed Sources": {
+   "main": [
+    [
+     {
+      "node": "Write Sources Log",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1",
+  "timezone": "Europe/Paris",
+  "saveManualExecutions": true,
+  "callerPolicy": "workflowsFromSameOwner",
+  "errorWorkflow": "y3fd7SBf6dhU261q",
+  "executionTimeout": 1200
+ }
+}

@@ -1,0 +1,115 @@
+{
+ "name": "_global_error_handler",
+ "nodes": [
+  {
+   "id": "err-trigger",
+   "name": "Error Trigger",
+   "type": "n8n-nodes-base.errorTrigger",
+   "typeVersion": 1,
+   "position": [
+    0,
+    0
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "fmt-error",
+   "name": "Format Error",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    220,
+    0
+   ],
+   "parameters": {
+    "mode": "runOnceForAllItems",
+    "jsCode": "const item = $input.first()?.json ?? {};\nconst ex = item.execution ?? {};\nconst wf = item.workflow ?? {};\nconst trg = item.trigger ?? null;\nconst err = ex.error ?? trg?.error ?? {};\n\nconst now = new Date();\nconst ts = now.toISOString();\nconst stamp = ts.replace(/[:.]/g, '-').slice(0, 19);\nconst wfName = wf.name ?? 'unknown';\nconst wfSlug = wfName.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 40);\nconst node = ex.lastNodeExecuted ?? trg?.name ?? 'n/a';\nconst msg = err.message ?? 'no error message';\nconst url = ex.url ?? 'no execution saved (activation error)';\n\nconst record = {\n  ts,\n  level: 'error',\n  workflow: wfName,\n  workflow_id: wf.id ?? null,\n  execution_id: ex.id ?? null,\n  node,\n  mode: ex.mode ?? 'activation',\n  error_name: err.name ?? null,\n  message: msg,\n  stack: String(err.stack ?? '').split('\\n').slice(0, 6).join('\\n'),\n  url,\n};\n\nconst filePath = $env.VEILLE_OUTPUT_DIR + '/_errors/' + stamp + '_' + wfSlug + '.json';\nconst content = JSON.stringify(record, null, 2);\nconst base64 = Buffer.from(content, 'utf-8').toString('base64');\n\nconst esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst subject = '[Veille][FAIL] ' + wfName + ' — ' + node;\nconst html =\n  '<div style=\"font-family:ui-monospace,monospace;font-size:13px;line-height:1.5;\">' +\n  '<h2 style=\"color:#d73a49;margin:0 0 12px;\">⚠️ ' + esc(wfName) + '</h2>' +\n  '<p><b>Node:</b> ' + esc(node) + '<br>' +\n  '<b>Error:</b> ' + esc(msg) + '<br>' +\n  '<b>Exec:</b> ' + (record.execution_id ?? 'n/a') + ' (' + record.mode + ')<br>' +\n  '<b>When:</b> ' + ts + '<br>' +\n  '<b>Open:</b> ' + esc(url) + '</p>' +\n  '<pre style=\"background:#f6f8fa;padding:8px;border-radius:4px;white-space:pre-wrap;\">' + esc(record.stack) + '</pre>' +\n  '</div>';\n\nreturn [{\n  json: { filePath, to: $env.VEILLE_TO_EMAIL, subject, html, ...record },\n  binary: { data: { data: base64, mimeType: 'application/json', fileName: stamp + '_' + wfSlug + '.json', fileExtension: 'json' } },\n}];"
+   }
+  },
+  {
+   "id": "write-file",
+   "name": "Write Error File",
+   "type": "n8n-nodes-base.readWriteFile",
+   "typeVersion": 1.1,
+   "position": [
+    440,
+    0
+   ],
+   "parameters": {
+    "operation": "write",
+    "fileName": "={{ $json.filePath }}",
+    "dataPropertyName": "data",
+    "options": {}
+   },
+   "onError": "continueRegularOutput"
+  },
+  {
+   "id": "send-email",
+   "name": "Send Error Email",
+   "type": "n8n-nodes-base.gmail",
+   "typeVersion": 2.1,
+   "position": [
+    660,
+    0
+   ],
+   "parameters": {
+    "sendTo": "={{ $json.to }}",
+    "subject": "={{ $json.subject }}",
+    "message": "={{ $json.html }}",
+    "options": {
+     "appendAttribution": false
+    }
+   },
+   "credentials": {
+    "gmailOAuth2": {
+     "id": "YVA0CrdAF8TfHKS8",
+     "name": "Gmail account veille emploi"
+    }
+   },
+   "onError": "continueRegularOutput",
+   "webhookId": "48cd2adb-8d18-45ad-96a6-970263cb732a"
+  }
+ ],
+ "connections": {
+  "Error Trigger": {
+   "main": [
+    [
+     {
+      "node": "Format Error",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Format Error": {
+   "main": [
+    [
+     {
+      "node": "Write Error File",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Write Error File": {
+   "main": [
+    [
+     {
+      "node": "Send Error Email",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1",
+  "timezone": "Europe/Paris",
+  "saveDataErrorExecution": "all",
+  "saveManualExecutions": true,
+  "callerPolicy": "workflowsFromSameOwner"
+ }
+}

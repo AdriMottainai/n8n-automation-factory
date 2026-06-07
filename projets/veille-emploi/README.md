@@ -4,10 +4,13 @@ Automatisation quotidienne de veille emploi : ingestion multi-source (feeds API 
 
 ## Workflows n8n
 
-| ID | Nom | État | Tier |
-|---|---|---|---|
-| `q2crCIIaJhSsXfRx` | Veille Emploi (daily) | **active=true** (prod) | 1 — feeds API/RSS |
-| `b8erSgFcfJ32W7vx` | Veille Emploi Emails (daily) | **active=true** (prod depuis 2026-06-01) | 2 — alertes plateformes |
+| ID | Nom | État | Nodes | Tier |
+|---|---|---|---|---|
+| `q2crCIIaJhSsXfRx` | Veille Emploi (daily) | **active=true** (prod) | 21 | 1 — feeds API/RSS |
+| `b8erSgFcfJ32W7vx` | Veille Emploi Emails (daily) | **active=true** (prod) | 13 | 2 — alertes plateformes |
+| `y3fd7SBf6dhU261q` | _global_error_handler | **active=true** | 4 | util — filet d'erreur (W1+W2) |
+
+Snapshots JSON figés : `projets/veille-emploi/workflows/<id>.json`.
 
 UI : http://localhost:5678/workflow/q2crCIIaJhSsXfRx · http://localhost:5678/workflow/b8erSgFcfJ32W7vx
 
@@ -28,6 +31,22 @@ UI : http://localhost:5678/workflow/q2crCIIaJhSsXfRx · http://localhost:5678/wo
 | `shared/veille-emploi/emails/YYYY-MM-DD.md` | digest journalier W2 (output) |
 
 _Namespacing par projet (`shared/veille-emploi/`) + refacto P0 env vars : **faits le 2026-06-01** (bloc B). Tous les paths/URLs/modèles des workflows passent par `$env.*` (voir `docker-compose.yml` section `x-n8n`)._
+
+## État au 2026-06-07 (hardening prod)
+
+Session de diagnostic + durcissement. Les 2 workflows étaient fonctionnels mais échouaient **en silence** (2 plantages OAuth Gmail le 04-06 non alertés). Corrigé :
+- **Filet d'erreur** : `_global_error_handler` (Error Trigger → fichier `_errors/<ts>.json` + email) attaché à W1+W2.
+- **OAuth** : app Google publiée en **Production** (fin de l'expiry 7j du mode Testing) + token régénéré.
+- **Idempotence W1** : l'upsert Qdrant (marquage « vu ») déplacé **après** l'envoi de l'email (node `Index New Jobs`) → plus de perte d'offre sur échec d'envoi. Validé live (Qdrant 40→41 post-envoi).
+- **Coût W2** : node `Dedup New Emails` (message-id) → fin de la ré-extraction LLM cloud de 7 jours d'emails à chaque run + des digests en double.
+- **Robustesse** : `retryOnFail` (3×) sur fetch+LLM, `timeout` HTTP sources, `executionTimeout` (W1 1200s / W2 900s).
+- **Observabilité sources W1** : 7 sources en `continueErrorOutput` → `Log Failed Sources` (visibilité d'une source morte).
+- **Scoring W2** : température 0 (déterministe).
+- **Outillage** : n8n-mcp bloquait localhost (SSRF strict) → `WEBHOOK_SECURITY_MODE=moderate` dans `.mcp.json` (effet au prochain lancement de `claude`).
+
+Détail complet + items à reprendre : project memory `[[project_veille_emploi_workflow]]` (bloc « ÉTAT COURANT »).
+
+⚠️ **Schedule décoratif** : les crons 9h ne se déclenchent pas seuls (Mac en veille → VM Docker suspendue, pas de rattrapage). Run manuel, ou host always-on pour du 24/7.
 
 ## État au 2026-06-01
 
