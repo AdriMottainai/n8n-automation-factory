@@ -212,9 +212,12 @@ Pour exponential backoff custom : `Loop Over Items` + `Wait` avec expression `Ma
       → retry
 ```
 
+**Budget temps = `timeout` (node) × `maxTries` — doit rester `<` `executionTimeout` du workflow.** Sinon un appel qui pend (LLM local qui swappe, endpoint muet) épuise les retries jusqu'au timeout global → run tué en **`canceled`**, sans message exploitable, et `errorWorkflow` **non déclenché si l'exécution est manuelle**. Diag : `stoppedAt − startedAt ≈ executionTimeout` ⇒ c'est le garde-fou atteint, pas l'erreur applicative — chercher le node bloqué (dernier sans résultat dans `runData`). Un retry ne « répare » pas un timeout de génération LLM (il re-pend à l'identique) → `maxTries` 1-2 + `timeout` serré, pas 5.
+
 **Anti-patterns** :
 - `Loop Over Items` batchSize=1 sans Wait → pas de throttle, juste sérialisation
 - Retry sur 4xx non-429 (400/401/403) → gaspillage, fail définitif
+- `timeout` × `maxTries` ≥ `executionTimeout` → le retry garantit d'atteindre le timeout global (run-zombie)
 
 ### 2.6 Idempotency — patterns du plus simple au plus robuste
 
@@ -246,6 +249,7 @@ CREATE TABLE idempotency_keys (
 - `{{ $now }}` ou `Date.now()` comme clé d'idempotence → garantie de doublons
 - `staticData` en exécution manuelle de test → vide, faux positifs/négatifs
 - `Remove Duplicates` AVANT une étape qui peut échouer en milieu de batch → items marqués "vus" sans avoir été traités. Solution : dédup **côté action** (gate juste avant le write/send), pas en amont.
+- **Idempotence en run MANUEL** : `Remove Duplicates`/`processed_data` persiste (donc consomme même en manuel), alors que `$getWorkflowStaticData` **ne persiste pas** en manuel → pour un record-after-action en run manuel, seul un store **fichier (`readWriteFile`) ou Postgres** fonctionne (vérifié : le node de marquage calcule bien l'état mais `staticData` reste vide après un run manuel).
 
 ### 2.7 OAuth refresh / Google credentials
 
@@ -709,6 +713,7 @@ Switch route au **node**, pas au credential. Un seul prompt, deux credentials.
 | Levier | Gain |
 |---|---|
 | Truncate input agressif (6000 chars body email) | −50 à −70 % input tokens |
+| Retirer du prompt les champs inutiles à la *tâche* (URLs/tracking, HTML, IDs) — les garder pour l'aval | −50 à −90 % selon le bruit (vu : URLs de tracking = 86 % d'un prompt de scoring) |
 | `format: 'json'` strict | −30 à −50 % output tokens (pas de prose) |
 | Zero-shot bien rédigé > few-shot | −500 à −3000 tokens/call |
 | Instructions concises | −20 à −40 % system prompt |
@@ -1015,6 +1020,8 @@ Avant d'`active=true` un nouveau workflow :
 - Commit d'un fichier credentials non chiffré dans git
 - Hardcode de `/data/shared/foo/` au lieu de `$env.VEILLE_OUTPUT_DIR`
 - Pas de monitoring proactif des OAuth Google → expiration silencieuse à J+7
+- `timeout` node × `maxTries` ≥ `executionTimeout` → retry garantit le timeout global = run-zombie tué en silence (cf. §2.5)
+- Dédup qui « consomme » en amont d'une action faillible → perte sur échec ; marquer vu **après** l'action (cf. §2.6)
 
 ---
 
@@ -1030,6 +1037,8 @@ Patterns transversaux capitalisés en feedback memories :
 - `feedback_llm_cloud_json_fence` — strip code fence avant `JSON.parse`
 - `feedback_gmail_oauth_publish` — publier app Google en Production
 - `feedback_security_transparency` — expliciter avant toute manip de secrets
+- `feedback_n8n_llm_timeout_retry_budget` — `timeout × maxTries < executionTimeout` sinon run-zombie tué en silence
+- `feedback_n8n_idempotence_mark_after_action` — marquer "vu" après l'action ; `staticData` non persisté en manuel
 
 ## Sources d'autorité consultées
 
@@ -1039,4 +1048,4 @@ Blog officiel n8n.io : "15 best practices for deploying AI agents in production"
 
 Community (patterns validés) : "Never let your automations silently fail", "Stopping duplicate Stripe charges (idempotency)", "Google credentials expire every week", "Best practices for structuring workflows at scale".
 
-Validé 2026-05-29.
+Validé 2026-05-29 ; révisé 2026-06-17 (§2.5 budget retry × timeout, §2.6 idempotence record-after-action en manuel, §6.2 allègement prompt).
