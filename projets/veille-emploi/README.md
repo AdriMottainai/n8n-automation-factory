@@ -1,70 +1,152 @@
-# Veille Emploi — projet en cours
+# Veille Emploi — pipeline d'automatisation de recherche d'emploi
 
-Automatisation quotidienne de veille emploi : ingestion multi-source (feeds API + alertes email), filtrage par profil, scoring LLM, matching CV vectoriel, digest markdown + email.
+> Deux workflows **n8n** qui, chaque jour, **collectent → normalisent → dédoublonnent (RAG) → matchent à mon CV → scorent par IA → résument** les offres d'emploi pertinentes dans un digest email. Auto-hébergé (n8n + Postgres + Qdrant + embeddings Ollama), inférence LLM sur API gratuite (Groq).
 
-## Workflows n8n
+Cas d'usage réel : automatiser une veille ciblée (profil **Sales / RevOps**, remote, France / EMEA) à partir de deux canaux complémentaires — des **feeds d'offres** (API/RSS de job boards) et les **alertes email** de plateformes (LinkedIn, Welcome to the Jungle…). Le tout tourne sur un Mac M1 8 Go, sans API payante.
 
-| ID | Nom | État | Nodes | Tier |
-|---|---|---|---|---|
-| `q2crCIIaJhSsXfRx` | Veille Emploi (daily) | **active=true** (prod) | 24 | 1 — feeds API/RSS |
-| `b8erSgFcfJ32W7vx` | Veille Emploi Emails (daily) | **active=true** (prod) | 14 | 2 — alertes plateformes |
-| `y3fd7SBf6dhU261q` | _global_error_handler | **active=true** | 4 | util — filet d'erreur (W1+W2) |
+---
 
-Snapshots JSON figés : `projets/veille-emploi/workflows/<id>.json`.
+## Ce que ça fait
 
-UI : http://localhost:5678/workflow/q2crCIIaJhSsXfRx · http://localhost:5678/workflow/b8erSgFcfJ32W7vx
+- **Agrège** les offres de 7 job boards (API + RSS) **et** les alertes email de plateformes.
+- **Normalise** 7 formats d'API hétérogènes vers un schéma unique.
+- **Filtre** par rôle (sur le titre **et** la description) et par localisation.
+- **Dédoublonne sémantiquement** via un vector store — y compris les mêmes offres postées sur plusieurs sources.
+- **Matche** chaque offre à mon CV par similarité cosinus (RAG).
+- **Score** chaque offre 0-10 avec un LLM, avec une **raison spécifique** par offre.
+- **Livre** un digest quotidien (Markdown archivé + email HTML), sections *Top* / *À suivre*.
 
-## Pipeline résumé
+---
 
-**W1 — feeds** : 7 sources (Remotive, Jobicy, WWR, France Travail, Himalayas, The Muse, RemoteOK) + recherche ciblée par rôle → normalize + filter (titre+desc) → dedup vectoriel (Qdrant `job_listings`, embed `bge-m3` local) → match CV (Qdrant `cv_profile`) → **score LLM Groq `llama-3.3-70b`** → digest markdown + email.
+## Architecture
 
-**W2 — emails** : Gmail label `job-alerts` (returnAll) → **extract LLM Groq `llama-4-scout`** (ctx 131K) → filter → **score LLM Groq** → digest markdown + email.
+```mermaid
+flowchart TB
+    subgraph INFRA["🖥️ Infra locale — Docker (Mac M1 8 Go)"]
+        N8N["n8n · orchestrateur"]
+        PG[("PostgreSQL<br/>backend n8n")]
+        QD[("Qdrant<br/>vector store")]
+        OL["Ollama · bge-m3<br/>embeddings (local)"]
+    end
+    GROQ["☁️ Groq API<br/>LLM · free tier"]
 
-> État détaillé (audit + P0/P1/P2 Groq, 2026-07-01) : project memory `[[project_veille_emploi_workflow]]`, bloc « ÉTAT COURANT ».
+    subgraph W1["W1 — Feeds (API / RSS)"]
+        direction TB
+        A1["⏰ Schedule"] --> A2["7 sources + recherche ciblée par rôle"]
+        A2 --> A3["Normalize & Filter"]
+        A3 --> A4["Dedup + Embed"]
+        A4 --> A5["Match CV (cosinus)"]
+        A5 --> A6["Score LLM"]
+        A6 --> A7["Digest + Email"]
+        A7 --> A8["Index Qdrant<br/>(après envoi)"]
+    end
 
-## Fichiers & dossiers projet
+    subgraph W2["W2 — Alertes email"]
+        direction TB
+        B1["⏰ Schedule"] --> B2["Gmail · label job-alerts"]
+        B2 --> B3["Filter Seen<br/>(idempotence)"]
+        B3 --> B4["Extract LLM<br/>(1 appel / email)"]
+        B4 --> B5["Filter rôles"]
+        B5 --> B6["Score LLM"]
+        B6 --> B7["Digest + Email"]
+        B7 --> B8["Mark Seen<br/>(après envoi)"]
+    end
 
-| Chemin | Rôle |
+    A4 <-->|"embed + dédup"| OL
+    A4 <--> QD
+    A5 <--> QD
+    A6 --> GROQ
+    B4 --> GROQ
+    B6 --> GROQ
+    W1 -.-> N8N
+    W2 -.-> N8N
+    N8N --- PG
+```
+
+Deux pipelines indépendants (isolation debug + activation séparée) qui partagent la même infra. La logique vit dans **PostgreSQL** (base n8n) ; le repo porte des **snapshots JSON** versionnés + les conventions.
+
+---
+
+## Pipeline W1 — Feeds (API / RSS)
+
+| Étape | Node(s) | Rôle |
+|---|---|---|
+| **Déclenchement** | Schedule Trigger | Quotidien (jours ouvrés) |
+| **Ingestion** | 7 fetch en parallèle : Remotive, Jobicy, WeWorkRemotely (RSS), France Travail (OAuth2, 3 mots-clés), Himalayas, The Muse (paginé), RemoteOK · + un node Code de **recherche ciblée** (Account Executive / Account Manager / Business Development) | Maximiser le rappel sur le profil |
+| **Normalisation** | `Normalize & Filter` (Code) | **Détection de shape** des 7 formats → schéma unique ; filtre rôle (titre + desc), filtre localisation, dédup titre+entreprise |
+| **Dédup sémantique** | `Dedup + Embed` (Code) | Skip si l'URL est déjà dans Qdrant `job_listings` ; sinon embed via **bge-m3** (1024-dim) |
+| **Matching CV** | `Match CV` (Code) | Similarité cosinus de l'offre vs Qdrant `cv_profile` (CV découpé en sections) |
+| **Scoring IA** | `Score LLM` (Groq `llama-3.3-70b`) | Score 0-10 + classe (top/watch/skip) + raison spécifique, en JSON |
+| **Livraison** | `Format Digest` → `Save` → `Send Email` (Gmail) | Digest Markdown + email HTML (badges score & CV) |
+| **Indexation** | `Index New Jobs` (Code) | Upsert Qdrant **après l'envoi** (idempotence) |
+
+## Pipeline W2 — Alertes email
+
+| Étape | Node(s) | Rôle |
+|---|---|---|
+| **Déclenchement** | Schedule Trigger | Quotidien |
+| **Lecture** | `Fetch Email IDs` (Gmail, label `job-alerts`, *returnAll*) | Récupère toutes les alertes de la fenêtre |
+| **Idempotence** | `Filter Seen` (Code, `staticData`) | Ne garde que les emails jamais traités (lecture seule) |
+| **Extraction IA** | `Fetch Email Full` → `Extract LLM` (Groq `llama-4-scout`, ctx 131K) | Extrait toutes les offres d'un email HTML (LinkedIn & co.) en JSON |
+| **Filtrage** | `Parse & Normalize` → `Filter by Keywords` | Schéma unique + filtre rôle/localisation |
+| **Scoring & livraison** | `Score LLM` (Groq) → `Format Digest` → `Send Email` | Idem W1 |
+| **Idempotence** | `Mark Seen` (Code, `staticData`) | Marque les emails traités **après l'envoi** |
+
+---
+
+## Choix d'ingénierie notables
+
+- **Ingestion multi-API tolérante aux pannes** — 7 formats JSON/RSS différents unifiés par détection de shape ; chaque source en `continueErrorOutput` → une source morte est *loggée*, pas fatale.
+- **RAG local pour les données perso** — dédup sémantique + matching CV via embeddings **bge-m3** + Qdrant : le CV et les offres ne quittent jamais la machine.
+- **Routage LLM adaptatif, par tâche** — embeddings en **local** (confidentialité, coût nul), scoring + extraction sur **Groq** (qualité, free tier). Le choix est fixé par étape via variables d'env — *pas* de node Switch.
+- **Idempotence « mark-after-action »** — une offre / un email n'est marqué « vu » qu'**après** l'envoi réussi du digest. Un run qui plante en cours de route ne perd aucune offre et n'envoie pas de doublon.
+- **Robustesse** — retries + timeouts par node, `executionTimeout` par workflow, **error workflow global**, et **modes dégradés** (le digest part même si le scoring LLM échoue, avec les offres brutes).
+- **Configuration externalisée** — paths, URLs, modèles, seuils, destinataire : tout en variables d'environnement (`VEILLE_*`, `GROQ_*`). Aucun *magic string* dans les workflows → portables et diffables.
+
+---
+
+## Stack technique
+
+| Composant | Rôle |
 |---|---|
-| `projets/veille-emploi/README.md` | ce fichier — 1-pager projet |
-| `projets/veille-emploi/analysis.md` | analyse factory & extraction (audit n8n + plan refacto) |
-| `shared/veille-emploi/cv/` | CV PDF (input) |
-| `shared/veille-emploi/jobs/YYYY-MM-DD.md` | digest journalier W1 (output) |
-| `shared/veille-emploi/emails/YYYY-MM-DD.md` | digest journalier W2 (output) |
+| **n8n** | Orchestration des workflows (self-hosted) |
+| **PostgreSQL** | Backend n8n (workflows, exécutions, état) |
+| **Qdrant** | Vector store (dédup `job_listings`, CV `cv_profile`) |
+| **Ollama** (`bge-m3`) | Embeddings locaux (RAG) |
+| **Groq API** (`llama-3.3-70b`, `llama-4-scout`) | Inférence LLM (scoring, extraction) — free tier, OpenAI-compatible |
+| **Gmail API / France Travail API** | Sources de données (OAuth2) |
+| **Docker Compose** | Packaging de la stack sur Mac M1 8 Go |
 
-_Namespacing par projet (`shared/veille-emploi/`) + refacto P0 env vars : **faits le 2026-06-01** (bloc B). Tous les paths/URLs/modèles des workflows passent par `$env.*` (voir `docker-compose.yml` section `x-n8n`)._
+---
 
-## État au 2026-06-07 (hardening prod)
+## Résultats (mesurés)
 
-Session de diagnostic + durcissement. Les 2 workflows étaient fonctionnels mais échouaient **en silence** (2 plantages OAuth Gmail le 04-06 non alertés). Corrigé :
-- **Filet d'erreur** : `_global_error_handler` (Error Trigger → fichier `_errors/<ts>.json` + email) attaché à W1+W2.
-- **OAuth** : app Google publiée en **Production** (fin de l'expiry 7j du mode Testing) + token régénéré.
-- **Idempotence W1** : l'upsert Qdrant (marquage « vu ») déplacé **après** l'envoi de l'email (node `Index New Jobs`) → plus de perte d'offre sur échec d'envoi. Validé live (Qdrant 40→41 post-envoi).
-- **Coût W2** : node `Dedup New Emails` (message-id) → fin de la ré-extraction LLM cloud de 7 jours d'emails à chaque run + des digests en double.
-- **Robustesse** : `retryOnFail` (3×) sur fetch+LLM, `timeout` HTTP sources, `executionTimeout` (W1 1200s / W2 900s).
-- **Observabilité sources W1** : 7 sources en `continueErrorOutput` → `Log Failed Sources` (visibilité d'une source morte).
-- **Scoring W2** : température 0 (déterministe).
-- **Outillage** : n8n-mcp bloquait localhost (SSRF strict) → `WEBHOOK_SECURITY_MODE=moderate` dans `.mcp.json` (effet au prochain lancement de `claude`).
+Sur une exécution réelle après refonte :
 
-Détail complet + items à reprendre : project memory `[[project_veille_emploi_workflow]]` (bloc « ÉTAT COURANT »).
+| Métrique | Valeur |
+|---|---|
+| W1 — offres brutes → retenues après filtre | ~500 → **64** |
+| W1 — digest | **9 top + 18 à suivre** |
+| W2 — digest | **19 top + 12 à suivre** |
+| Qualité du scoring | raisons **spécifiques** par offre (ex. *« Revenue Operations Bordeaux »*, *« Fivetran EMEA »*) |
+| Coût d'inférence LLM | **0 €** (Groq free tier) |
 
-⚠️ **Schedule décoratif** : les crons 9h ne se déclenchent pas seuls (Mac en veille → VM Docker suspendue, pas de rattrapage). Run manuel, ou host always-on pour du 24/7.
+---
 
-## État au 2026-06-01
+## Configuration & sécurité
 
-- **W1** : prod stable. Refacto env vars + namespacing `shared/veille-emploi/` appliqués (bloc B).
-- **W2** : **activée** (active=true). Refacto env vars appliqué.
-- **Bloc B fait** : `docker-compose.yml` porte les env vars `VEILLE_*` / `OLLAMA_*_URL` / `QDRANT_URL` + `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` (requis pour `$env` en Code node) + perf M1 (`N8N_CONCURRENCY_PRODUCTION_LIMIT=3`, `NODE_OPTIONS`, `mem_limit=2.5g`). Mécanisme `$env` validé via sonde.
-- **À surveiller W2** : qualité d'extraction (location/url/desc souvent `"Not specified"` sur les emails LinkedIn). Si récurrent → patch prompt + préserver `<a href>` ou switcher modèle vers `qwen3.5:397b` / `gpt-oss:120b`.
+- **Aucun secret dans le repo.** Les clés API et tokens OAuth vivent (a) chiffrés dans le *credential store* de n8n, (b) en variables d'environnement hors dépôt (`~/.zsh_secrets`), référencés dans les workflows par `$env.*` ou par ID de credential.
+- Les **snapshots de workflow** versionnés (`workflows/*.json`) ne contiennent que des **références** de credentials (id + nom) — jamais les valeurs (comportement standard des exports n8n).
+- La **config non-sensible** (URLs, modèles, chemins, `VEILLE_*` / `GROQ_*`) est dans `docker-compose.yml`, versionnée.
+- Le bind-mount `shared/` (CV, digests, backups) est **gitignoré**.
 
-## Reste à faire
+---
 
-Voir `projets/veille-emploi/analysis.md` § 1 (anti-patterns) et §3 (priorités P0/P1/P2), et la project memory `[[project_veille_emploi_workflow]]` pour l'état détaillé.
+## Repo & runtime
 
-## Credentials n8n
-
-Listées dans la project memory `[[project_veille_emploi_workflow]]` (6 creds : France Travail, Gmail, Ollama local, Qdrant, Ollama Cloud, Ollama Cloud HTTP).
-
-## Graduation
-
-Quand W2 est stable depuis ~1 mois, suivre la checklist `analysis.md § 4.3`. Destination : `~/projets/n8n/veille-emploi/`.
+| Élément | Emplacement |
+|---|---|
+| Snapshots workflows | [`workflows/`](workflows/) (`q2crCIIaJhSsXfRx` = W1, `b8erSgFcfJ32W7vx` = W2, `y3fd7SBf6dhU261q` = error handler) |
+| Conventions d'ingénierie | [`../../n8n/conventions.md`](../../n8n/conventions.md) — robustesse, observabilité, idempotence, exportabilité |
+| Runtime (source de vérité) | PostgreSQL (base n8n) — les snapshots du repo en sont une copie versionnée |
+| Données (gitignorées) | `shared/veille-emploi/{cv,jobs,emails,backups}` |
