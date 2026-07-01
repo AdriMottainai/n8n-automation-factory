@@ -6,8 +6,8 @@ Automatisation quotidienne de veille emploi : ingestion multi-source (feeds API 
 
 | ID | Nom | État | Nodes | Tier |
 |---|---|---|---|---|
-| `q2crCIIaJhSsXfRx` | Veille Emploi (daily) | **active=true** (prod) | 21 | 1 — feeds API/RSS |
-| `b8erSgFcfJ32W7vx` | Veille Emploi Emails (daily) | **active=true** (prod) | 13 | 2 — alertes plateformes |
+| `q2crCIIaJhSsXfRx` | Veille Emploi (daily) | **active=true** (prod) | 24 | 1 — feeds API/RSS |
+| `b8erSgFcfJ32W7vx` | Veille Emploi Emails (daily) | **active=true** (prod) | 14 | 2 — alertes plateformes |
 | `y3fd7SBf6dhU261q` | _global_error_handler | **active=true** | 4 | util — filet d'erreur (W1+W2) |
 
 Snapshots JSON figés : `projets/veille-emploi/workflows/<id>.json`.
@@ -16,9 +16,11 @@ UI : http://localhost:5678/workflow/q2crCIIaJhSsXfRx · http://localhost:5678/wo
 
 ## Pipeline résumé
 
-**W1 — feeds** : Remotive + Jobicy + WeWorkRemotely + France Travail → normalize + filter → dedup vectoriel (Qdrant `job_listings`) → match CV (Qdrant `cv_profile`) → score LLM local → digest markdown + email.
+**W1 — feeds** : 7 sources (Remotive, Jobicy, WWR, France Travail, Himalayas, The Muse, RemoteOK) + recherche ciblée par rôle → normalize + filter (titre+desc) → dedup vectoriel (Qdrant `job_listings`, embed `bge-m3` local) → match CV (Qdrant `cv_profile`) → **score LLM Groq `llama-3.3-70b`** → digest markdown + email.
 
-**W2 — emails** : Gmail label `job-alerts` → extract LLM cloud (qwen3-coder:480b) → filter → score LLM local → digest markdown + email.
+**W2 — emails** : Gmail label `job-alerts` (returnAll) → **extract LLM Groq `llama-4-scout`** (ctx 131K) → filter → **score LLM Groq** → digest markdown + email.
+
+> État détaillé (audit + P0/P1/P2 Groq, 2026-07-01) : project memory `[[project_veille_emploi_workflow]]`, bloc « ÉTAT COURANT ».
 
 ## Fichiers & dossiers projet
 

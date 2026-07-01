@@ -1,402 +1,441 @@
 {
- "name": "Veille Emploi Emails (daily)",
- "nodes": [
-  {
-   "parameters": {
-    "rule": {
-     "interval": [
-      {
-       "field": "cronExpression",
-       "expression": "30 9 * * *"
+  "name": "Veille Emploi Emails (daily)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-1",
+      "name": "Daily 9h30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        208,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "filters": {
+          "q": "label:job-alerts newer_than:7d"
+        },
+        "returnAll": true
+      },
+      "id": "fetch-emails",
+      "name": "Fetch Email IDs",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        432,
+        400
+      ],
+      "webhookId": "fa632b73-f302-4a17-afea-15ca2d7bb63d",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YVA0CrdAF8TfHKS8",
+          "name": "Gmail account veille emploi"
+        }
       }
-     ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const email = $input.item.json;\nconst subject = email.subject || email.Subject || '';\nlet from = email.from || email.From || '';\nif (from && typeof from === 'object') from = (from.value && from.value[0] && from.value[0].address) || from.address || from.text || '';\nfrom = String(from || 'unknown');\n\nfunction b64urlDecode(data) {\n  try { return Buffer.from(String(data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8'); }\n  catch (e) { return ''; }\n}\nfunction extractBody(payload) {\n  let text = '', html = '';\n  (function walk(part) {\n    if (!part) return;\n    const mime = part.mimeType || '';\n    if (mime === 'text/plain' && part.body && part.body.data) text += b64urlDecode(part.body.data);\n    else if (mime === 'text/html' && part.body && part.body.data) html += b64urlDecode(part.body.data);\n    if (Array.isArray(part.parts)) part.parts.forEach(walk);\n  })(payload);\n  return { text: text, html: html };\n}\n\nlet body = email.text || '';\nlet htmlSrc = email.html || '';\nif (!body && !htmlSrc && email.payload) { const d = extractBody(email.payload); body = d.text || ''; htmlSrc = d.html || ''; }\nif (!body && htmlSrc) {\n  body = htmlSrc\n    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')\n    .replace(/&#39;/g, \"'\").replace(/&quot;/g, '\"')\n    .replace(/\\s+/g, ' ').trim();\n}\nif (!body) body = email.snippet || '';\nconst MAX_CHARS = parseInt($env.VEILLE_EXTRACT_MAX_CHARS, 10) || 30000; const bodyTruncated = body.substring(0, MAX_CHARS);\n\nconst sys = 'Tu es un extracteur d offres d emploi. Tu lis un email d alerte emploi et extrais toutes les offres qu il contient. Reponds UNIQUEMENT avec un JSON valide.';\nconst usr = 'Email recu.\\nDe: ' + from + '\\nSujet: ' + subject + '\\n\\nContenu:\\n' + bodyTruncated + '\\n\\nExtrais toutes les offres d emploi presentes. Format de reponse: un objet JSON avec une cle jobs qui est un tableau. Chaque element a les cles title, company, location, url, desc. Si aucune offre, renvoie jobs avec tableau vide.';\n\nconst msgs = [\n  { role: 'system', content: sys },\n  { role: 'user', content: usr }\n];\nconst opts = { temperature: 0.2 };\nconst requestBody = { model: $env.VEILLE_EXTRACT_MODEL_API, messages: msgs, response_format: { type: 'json_object' }, temperature: opts.temperature };\n\nconst out = { requestBody: requestBody, emailId: email.id, emailFrom: from, emailSubject: subject, bodyLen: body.length };\nreturn { json: out };\n"
+      },
+      "id": "build-extract",
+      "name": "Build Extract Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GROQ_BASE_URL }}/chat/completions",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 180000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 6000
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "id": "extract-llm",
+      "name": "Extract Jobs (LLM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1328,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nconst requests = $('Build Extract Request').all();\nconst allJobs = [];\n\nfor (let i = 0; i < responses.length; i++) {\n  const resp = responses[i].json;\n  const req = requests[i] ? requests[i].json : {};\n  const emailFrom = req.emailFrom || 'unknown';\n\n  let jobs = [];\n  try {\n    let content = resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content : '';\n    if (typeof content === 'string') {\n      content = content.replace(/^\\s*```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/, '').trim();\n      const m = content.match(/\\{[\\s\\S]*\\}/);\n      if (m) content = m[0];\n    }\n    const parsed = typeof content === 'string' ? JSON.parse(content) : content;\n    jobs = parsed.jobs || [];\n  } catch (e) {\n    jobs = [];\n  }\n\n  let source = 'Email';\n  const f = emailFrom.toLowerCase();\n  if (f.indexOf('linkedin') >= 0) source = 'LinkedIn';\n  else if (f.indexOf('welcometothejungle') >= 0) source = 'WTTJ';\n  else if (f.indexOf('web3.career') >= 0) source = 'Web3.career';\n  else if (f.indexOf('cryptocareers') >= 0) source = 'CryptoCareers';\n  else if (f.indexOf('trueup') >= 0) source = 'TrueUp';\n  else if (f.indexOf('remote3') >= 0) source = 'Remote3';\n\n  for (const j of jobs) {\n    const descStr = j.desc || '';\n    allJobs.push({\n      title: j.title || '',\n      company: j.company || '',\n      location: j.location || 'Remote',\n      url: j.url || '',\n      desc: descStr.substring(0, 500),\n      source: source,\n      date: '',\n      cat: '',\n      tags: '',\n      salary: ''\n    });\n  }\n}\n\nreturn allJobs.map(j => ({ json: j }));"
+      },
+      "id": "parse-normalize",
+      "name": "Parse & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const jobs = $input.all().map(i => i.json);\nconst INCLUDE = [\"account executive\", \"enterprise account executive\", \"strategic account executive\", \"mid-market account executive\", \"smb account executive\", \"account manager\", \"key account manager\", \"named account manager\", \"strategic account manager\", \"account director\", \"account management\", \"revenue operations\", \"revops\", \"rev ops\", \"sales operations\", \"sales ops\", \"gtm operations\", \"gtm ops\", \"go-to-market operations\", \"growth operations\", \"growth ops\", \"outbound sales\", \"outbound operations\", \"business development\", \"business developer\", \"partnerships\", \"partner manager\", \"alliances\", \"customer success manager\", \"sales manager\", \"ingenieur d'affaires\", \"charge d'affaires\", \"charge de developpement commercial\", \"responsable grands comptes\", \"responsable comptes cles\", \"gestionnaire grands comptes\"];\nconst EXCLUDE = [\"head of sales\", \"vp sales\", \"vp of sales\", \"vice president of sales\", \"svp sales\", \"chief revenue officer\", \"chief sales officer\", \"directeur commercial\", \"directrice commerciale\", \"directeur des ventes\", \"sales director\", \"technico-commercial\", \"technico commercial\", \"commercial terrain\", \"commercial sedentaire\", \"commercial itinerant\", \"vendeur\", \"vendeuse\", \"televente\", \"teleconseiller\", \"teleprospecteur\", \"porte-a-porte\", \"vrp\", \"agent commercial\", \"agent general\", \"assurance\", \"assureur\", \"mutuelle\", \"prevoyance\", \"courtier\", \"immobilier\", \"btp\", \"batiment\", \"menuiserie\", \"fenetre\", \"isolation\", \"photovoltaique\", \"panneaux solaires\", \"automobile\", \"concession\", \"grande distribution\", \"pompes funebres\", \"sales engineer\", \"sales engineering\", \"presales\", \"pre-sales\", \"avant-vente\", \"sales development\", \"sdr\", \"salesforce\", \"recruteur\", \"recruitment\", \"talent acquisition\", \"stage\", \"alternance\", \"apprentissage\", \"stagiaire\"];\nconst L = [\"remote\", \"fully remote\", \"full remote\", \"remote-first\", \"remote france\", \"remote europe\", \"eu remote\", \"wfh\", \"work from home\", \"distributed\", \"anywhere\", \"worldwide\", \"teletravail\", \"distanciel\", \"hybrid\", \"hybride\", \"france\", \"nantes\", \"toulouse\", \"lyon\", \"paris\", \"bordeaux\", \"lille\", \"rennes\", \"nice\", \"montpellier\", \"marseille\", \"strasbourg\", \"nouvelle-aquitaine\", \"ile-de-france\", \"europe\", \"emea\", \"global\"];\nconst VAGUE_LOC = ['', 'unknown', 'not specified', 'n/a', 'na', 'none', '?', '-'];\nconst deburr = s => (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');\n\nconst filtered = (typeof allJobs !== 'undefined' ? allJobs : jobs).filter(j => {\n  const title = deburr(j.title);\n  const hay = deburr((j.title || '') + ' ' + (j.desc || ''));\n  if (EXCLUDE.some(k => title.indexOf(k) >= 0)) return false;\n  const roleMatch = INCLUDE.some(k => hay.indexOf(k) >= 0);\n  const loc = deburr(j.location).trim();\n  const locationMatch = L.some(k => loc.indexOf(k) >= 0) || VAGUE_LOC.indexOf(loc) >= 0;\n  return roleMatch && locationMatch;\n});\n\nconst seen = new Set();\nconst unique = filtered.filter(j => {\n  const k = (j.title + '_' + j.company).toLowerCase();\n  if (seen.has(k)) return false;\n  seen.add(k);\n  return true;\n});\n\nreturn unique.map(j => ({ json: j }));\n"
+      },
+      "id": "filter-keywords",
+      "name": "Filter by Keywords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const jobs = $input.all().map(i => i.json);\nconst MAX = parseInt($env.VEILLE_BATCH_MAX, 10) || 40;\nconst batch = jobs.slice(0, MAX);\n\nlet jobsText = '';\nfor (let i = 0; i < batch.length; i++) {\n  const j = batch[i];\n  jobsText += (i+1) + '. ' + j.title + ' @ ' + j.company + ' (' + j.location + ')\\n';\n  jobsText += 'Source: ' + j.source + '\\n';\n  jobsText += 'Desc: ' + (j.desc || '').substring(0, 300) + '\\n\\n';\n}\n\nconst sys = 'Tu es un assistant de veille emploi pour un candidat base a Bordeaux, qui recherche surtout du REMOTE. Profil cible: Account Executive, Account Manager / Key Account, Revenue Operations, Sales Ops, GTM Ops, Outbound/Growth Ops, Business Development. Secteurs prioritaires: crypto-fintech, foodtech, AI, SaaS. NON cible (score bas): postes trop seniors (Head of Sales, VP, Director), technico-commercial, assurance, BTP, vente terrain. Score chaque offre 0-10 selon pertinence. Reponds UNIQUEMENT avec un JSON valide, aucun texte autour.';\n\nconst usr = 'Voici ' + batch.length + ' offres issues d alertes email. Pour chaque offre, donne un score (0-10), une raison courte (max 15 mots) et une classe (top si >=7, watch si 4-6, skip si <4).\\n\\nFormat de reponse: un objet JSON avec une cle scores qui est un tableau. Chaque element a les cles n, score, class, reason.\\n\\nOffres:\\n' + jobsText;\n\nconst msgs = [\n  { role: 'system', content: sys },\n  { role: 'user', content: usr }\n];\nconst opts = { temperature: 0, num_ctx: 8192 };\nconst requestBody = { model: $env.VEILLE_SCORE_MODEL_API, messages: msgs, response_format: { type: 'json_object' }, temperature: opts.temperature };\n\nconst out = { requestBody: requestBody, jobs: batch, jobsCount: batch.length };\nreturn [{ json: out }];"
+      },
+      "id": "prepare-scoring",
+      "name": "Prepare Scoring",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GROQ_BASE_URL }}/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 90000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "id": "score-llm",
+      "name": "Score LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2224,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const llm = $input.first().json;\nconst preparedJobs = $('Prepare Scoring').first().json.jobs || [];\n\nconst TO_EMAIL = $env.VEILLE_TO_EMAIL;\n\nfunction esc(s) {\n  return String(s == null ? '' : s)\n    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;');\n}\n\nlet scores = [];\ntry {\n  const content = llm.choices && llm.choices[0] && llm.choices[0].message ? llm.choices[0].message.content : '';\n  const parsed = typeof content === 'string' ? JSON.parse(content) : content;\n  scores = parsed.scores || [];\n} catch (e) { scores = []; }\n\nconst scored = preparedJobs.map((j, i) => {\n  const found = scores.find(x => Number(x.n) === (i+1));\n  const score = found ? (found.score || 0) : 0;\n  const klass = found ? (found.class || 'skip') : 'skip';\n  const reason = found ? (found.reason || '') : 'non score';\n  return Object.assign({}, j, { score: score, klass: klass, reason: reason });\n});\n\nconst top = scored.filter(j => j.klass === 'top').sort((a,b) => b.score - a.score);\nconst watch = scored.filter(j => j.klass === 'watch').sort((a,b) => b.score - a.score);\n\nconst today = new Date().toISOString().substring(0, 10);\n\n// --- Markdown (for file Save Digest) ---\nlet md = '# Veille Emploi Emails — ' + today + '\\n\\n';\nmd += '_' + scored.length + ' offres extraites — ' + top.length + ' top, ' + watch.length + ' a suivre_\\n\\n';\nmd += '## Top (score >= 7)\\n\\n';\nif (top.length === 0) md += '_Aucune offre top aujourd hui._\\n\\n';\nfor (const j of top) {\n  md += '### [' + j.score + '/10] ' + j.title + ' — ' + j.company + '\\n';\n  md += '- Location: ' + j.location + '\\n';\n  md += '- Source: ' + j.source + '\\n';\n  md += '- URL: ' + j.url + '\\n';\n  md += '- Raison: ' + j.reason + '\\n';\n  if (j.salary) md += '- Salary: ' + j.salary + '\\n';\n  md += '\\n';\n}\nmd += '## A suivre (4-6)\\n\\n';\nif (watch.length === 0) md += '_Aucune offre a suivre._\\n\\n';\nfor (const j of watch) {\n  md += '- [' + j.score + '/10] [' + j.title + '](' + j.url + ') @ ' + j.company + ' — ' + j.location + ' — _' + j.reason + '_\\n';\n}\n\n// --- HTML (for email) ---\nfunction jobCard(j) {\n  const badge = '<span style=\"display:inline-block;background:#0969da;color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\">' + j.score + '/10</span>';\n  return '<div style=\"border:1px solid #e1e4e8;border-radius:6px;padding:12px;margin:8px 0;\">'\n    + '<div style=\"font-size:15px;font-weight:600;\">' + badge + ' ' + esc(j.title) + ' — ' + esc(j.company) + '</div>'\n    + '<div style=\"font-size:13px;color:#57606a;margin-top:4px;\">' + esc(j.location) + ' · ' + esc(j.source) + '</div>'\n    + '<div style=\"font-size:13px;margin-top:6px;\"><a href=\"' + esc(j.url) + '\" style=\"color:#0969da;text-decoration:none;\">Voir l\\'offre →</a></div>'\n    + '<div style=\"font-size:13px;color:#24292f;margin-top:6px;\"><em>' + esc(j.reason) + '</em></div>'\n    + '</div>';\n}\nfunction watchLine(j) {\n  return '<li style=\"font-size:13px;margin:4px 0;\"><strong>[' + j.score + '/10]</strong> <a href=\"' + esc(j.url) + '\" style=\"color:#0969da;\">' + esc(j.title) + '</a> @ ' + esc(j.company) + ' — ' + esc(j.location) + ' — <em>' + esc(j.reason) + '</em></li>';\n}\n\nlet inner = '<p style=\"font-size:14px;color:#57606a;\">' + scored.length + ' offres extraites — ' + top.length + ' top, ' + watch.length + ' a suivre.</p>';\ninner += '<h2 style=\"font-size:16px;margin-top:24px;\">Top (score &gt;= 7)</h2>';\nif (top.length === 0) inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre top aujourd hui.</em></p>';\nelse inner += top.map(jobCard).join('');\ninner += '<h2 style=\"font-size:16px;margin-top:24px;\">A suivre (4-6)</h2>';\nif (watch.length === 0) inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre a suivre.</em></p>';\nelse inner += '<ul style=\"padding-left:20px;\">' + watch.map(watchLine).join('') + '</ul>';\n\nconst html = '<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2328;\">'\n  + '<div style=\"max-width:680px;margin:0 auto;padding:24px;\">'\n  + '<h1 style=\"font-size:20px;margin:0 0 16px;\">Veille Emploi Emails — ' + today + '</h1>'\n  + inner\n  + '<hr style=\"border:0;border-top:1px solid #e1e4e8;margin:24px 0;\">'\n  + '<div style=\"font-size:12px;color:#6a737d;\">Veille Emploi · alertes plateformes · ' + esc(today) + '</div>'\n  + '</div></body></html>';\n\nconst subject = '[Veille] Email Alerts ' + today + ' — ' + top.length + ' top, ' + watch.length + ' a suivre';\n\nconst filePath = $env.VEILLE_OUTPUT_DIR + '/emails/' + today + '.md';\nconst base64 = Buffer.from(md, 'utf-8').toString('base64');\n\nreturn [{\n  json: {\n    filePath: filePath, count: scored.length, topCount: top.length, watchCount: watch.length,\n    to: TO_EMAIL, subject: subject, html: html\n  },\n  binary: { data: { data: base64, mimeType: 'text/markdown', fileName: today + '.md', fileExtension: 'md' } }\n}];\n"
+      },
+      "id": "format-digest",
+      "name": "Format Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.filePath }}",
+        "options": {}
+      },
+      "id": "save-digest",
+      "name": "Save Digest",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        2672,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": "={{ $json.id }}",
+        "simple": false,
+        "options": {}
+      },
+      "id": "fetch-full",
+      "name": "Fetch Email Full",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        400
+      ],
+      "webhookId": "c54afa88-0c52-43f5-9a0f-e97377a7a8fd",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YVA0CrdAF8TfHKS8",
+          "name": "Gmail account veille emploi"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "send-digest-email-w2",
+      "name": "Send Digest Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2896,
+        400
+      ],
+      "webhookId": "b9c55e02-f9eb-49f8-abeb-0a485ac727dc",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YVA0CrdAF8TfHKS8",
+          "name": "Gmail account veille emploi"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// IDEMPOTENCE — lecture seule. Marque vu => fait dans \"Mark Seen\" APRÈS envoi.\n// Garantit qu'un run planté (scoring/OAuth/réseau) ne \"consomme\" pas les emails.\nconst sd = $getWorkflowStaticData('global');\nconst seen = new Set(sd.seenEmailIds || []);\nconst fresh = $input.all().filter(i => i.json && i.json.id && !seen.has(i.json.id));\nreturn fresh;",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "dedup-new-emails",
+      "name": "Filter Seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        400
+      ]
+    },
+    {
+      "id": "6924da78-1106-4a85-bcaf-603ea2046527",
+      "name": "Mark Seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// IDEMPOTENCE — marque vus les emails traités CE run, APRÈS Send Digest Email.\n// staticData n'est persisté qu'en fin de run réussi => pas de perte sur échec amont.\nconst sd = $getWorkflowStaticData('global');\nconst seen = new Set(sd.seenEmailIds || []);\nlet added = 0;\nfor (const it of $('Filter Seen').all()) {\n  const id = it.json && it.json.id;\n  if (id && !seen.has(id)) { seen.add(id); added++; }\n}\nsd.seenEmailIds = Array.from(seen).slice(-1000); // cap anti-croissance\nreturn [{ json: { _marked: added, _seen_total: sd.seenEmailIds.length } }];",
+        "mode": "runOnceForAllItems"
+      }
     }
-   },
-   "id": "trigger-1",
-   "name": "Daily 9h30",
-   "type": "n8n-nodes-base.scheduleTrigger",
-   "typeVersion": 1.3,
-   "position": [
-    208,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "operation": "getAll",
-    "filters": {
-     "q": "label:job-alerts newer_than:7d"
+  ],
+  "connections": {
+    "Daily 9h30": {
+      "main": [
+        [
+          {
+            "node": "Fetch Email IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Extract Request": {
+      "main": [
+        [
+          {
+            "node": "Extract Jobs (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Jobs (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Parse & Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Normalize": {
+      "main": [
+        [
+          {
+            "node": "Filter by Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter by Keywords": {
+      "main": [
+        [
+          {
+            "node": "Prepare Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Scoring": {
+      "main": [
+        [
+          {
+            "node": "Score LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score LLM": {
+      "main": [
+        [
+          {
+            "node": "Format Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest": {
+      "main": [
+        [
+          {
+            "node": "Save Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Email IDs": {
+      "main": [
+        [
+          {
+            "node": "Filter Seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Email Full": {
+      "main": [
+        [
+          {
+            "node": "Build Extract Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Digest Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Seen": {
+      "main": [
+        [
+          {
+            "node": "Fetch Email Full",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Send Digest Email": {
+      "main": [
+        [
+          {
+            "node": "Mark Seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
-   },
-   "id": "fetch-emails",
-   "name": "Fetch Email IDs",
-   "type": "n8n-nodes-base.gmail",
-   "typeVersion": 2.2,
-   "position": [
-    432,
-    400
-   ],
-   "webhookId": "fa632b73-f302-4a17-afea-15ca2d7bb63d",
-   "retryOnFail": true,
-   "maxTries": 3,
-   "waitBetweenTries": 3000,
-   "credentials": {
-    "gmailOAuth2": {
-     "id": "YVA0CrdAF8TfHKS8",
-     "name": "Gmail account veille emploi"
-    }
-   }
   },
-  {
-   "parameters": {
-    "mode": "runOnceForEachItem",
-    "jsCode": "const email = $input.item.json;\nconst subject = email.subject || email.Subject || '';\nlet from = email.from || email.From || '';\nif (from && typeof from === 'object') from = (from.value && from.value[0] && from.value[0].address) || from.address || from.text || '';\nfrom = String(from || 'unknown');\n\nfunction b64urlDecode(data) {\n  try { return Buffer.from(String(data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8'); }\n  catch (e) { return ''; }\n}\nfunction extractBody(payload) {\n  let text = '', html = '';\n  (function walk(part) {\n    if (!part) return;\n    const mime = part.mimeType || '';\n    if (mime === 'text/plain' && part.body && part.body.data) text += b64urlDecode(part.body.data);\n    else if (mime === 'text/html' && part.body && part.body.data) html += b64urlDecode(part.body.data);\n    if (Array.isArray(part.parts)) part.parts.forEach(walk);\n  })(payload);\n  return { text: text, html: html };\n}\n\nlet body = email.text || '';\nlet htmlSrc = email.html || '';\nif (!body && !htmlSrc && email.payload) { const d = extractBody(email.payload); body = d.text || ''; htmlSrc = d.html || ''; }\nif (!body && htmlSrc) {\n  body = htmlSrc\n    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')\n    .replace(/&#39;/g, \"'\").replace(/&quot;/g, '\"')\n    .replace(/\\s+/g, ' ').trim();\n}\nif (!body) body = email.snippet || '';\nconst bodyTruncated = body.substring(0, 6000);\n\nconst sys = 'Tu es un extracteur d offres d emploi. Tu lis un email d alerte emploi et extrais toutes les offres qu il contient. Reponds UNIQUEMENT avec un JSON valide.';\nconst usr = 'Email recu.\\nDe: ' + from + '\\nSujet: ' + subject + '\\n\\nContenu:\\n' + bodyTruncated + '\\n\\nExtrais toutes les offres d emploi presentes. Format de reponse: un objet JSON avec une cle jobs qui est un tableau. Chaque element a les cles title, company, location, url, desc. Si aucune offre, renvoie jobs avec tableau vide.';\n\nconst msgs = [\n  { role: 'system', content: sys },\n  { role: 'user', content: usr }\n];\nconst opts = { temperature: 0.2 };\nconst requestBody = { model: $env.VEILLE_EXTRACT_MODEL_CLOUD, messages: msgs, stream: false, format: 'json', options: opts };\n\nconst out = { requestBody: requestBody, emailId: email.id, emailFrom: from, emailSubject: subject, bodyLen: body.length };\nreturn { json: out };\n"
-   },
-   "id": "build-extract",
-   "name": "Build Extract Request",
-   "type": "n8n-nodes-base.code",
-   "typeVersion": 2,
-   "position": [
-    1104,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "method": "POST",
-    "url": "={{ $env.OLLAMA_CLOUD_URL }}/api/chat",
-    "authentication": "genericCredentialType",
-    "genericAuthType": "httpHeaderAuth",
-    "sendBody": true,
-    "specifyBody": "json",
-    "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
-    "options": {
-     "timeout": 180000
-    }
-   },
-   "id": "extract-llm",
-   "name": "Extract Jobs (LLM)",
-   "type": "n8n-nodes-base.httpRequest",
-   "typeVersion": 4.4,
-   "position": [
-    1328,
-    400
-   ],
-   "retryOnFail": true,
-   "maxTries": 3,
-   "waitBetweenTries": 5000,
-   "credentials": {
-    "httpHeaderAuth": {
-     "id": "6TAhBNOHggj8TW0z",
-     "name": "Ollama Cloud HTTP"
-    }
-   },
-   "onError": "continueRegularOutput"
-  },
-  {
-   "parameters": {
-    "jsCode": "const responses = $input.all();\nconst requests = $('Build Extract Request').all();\nconst allJobs = [];\n\nfor (let i = 0; i < responses.length; i++) {\n  const resp = responses[i].json;\n  const req = requests[i] ? requests[i].json : {};\n  const emailFrom = req.emailFrom || 'unknown';\n\n  let jobs = [];\n  try {\n    let content = resp.message && resp.message.content ? resp.message.content : '';\n    if (typeof content === 'string') {\n      content = content.replace(/^\\s*```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/, '').trim();\n      const m = content.match(/\\{[\\s\\S]*\\}/);\n      if (m) content = m[0];\n    }\n    const parsed = typeof content === 'string' ? JSON.parse(content) : content;\n    jobs = parsed.jobs || [];\n  } catch (e) {\n    jobs = [];\n  }\n\n  let source = 'Email';\n  const f = emailFrom.toLowerCase();\n  if (f.indexOf('linkedin') >= 0) source = 'LinkedIn';\n  else if (f.indexOf('welcometothejungle') >= 0) source = 'WTTJ';\n  else if (f.indexOf('web3.career') >= 0) source = 'Web3.career';\n  else if (f.indexOf('cryptocareers') >= 0) source = 'CryptoCareers';\n  else if (f.indexOf('trueup') >= 0) source = 'TrueUp';\n  else if (f.indexOf('remote3') >= 0) source = 'Remote3';\n\n  for (const j of jobs) {\n    const descStr = j.desc || '';\n    allJobs.push({\n      title: j.title || '',\n      company: j.company || '',\n      location: j.location || 'Remote',\n      url: j.url || '',\n      desc: descStr.substring(0, 500),\n      source: source,\n      date: '',\n      cat: '',\n      tags: '',\n      salary: ''\n    });\n  }\n}\n\nreturn allJobs.map(j => ({ json: j }));"
-   },
-   "id": "parse-normalize",
-   "name": "Parse & Normalize",
-   "type": "n8n-nodes-base.code",
-   "typeVersion": 2,
-   "position": [
-    1552,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "jsCode": "const jobs = $input.all().map(i => i.json);\nconst INCLUDE = [\"account executive\", \"enterprise account executive\", \"strategic account executive\", \"mid-market account executive\", \"smb account executive\", \"account manager\", \"key account manager\", \"named account manager\", \"strategic account manager\", \"account director\", \"account management\", \"revenue operations\", \"revops\", \"rev ops\", \"sales operations\", \"sales ops\", \"gtm operations\", \"gtm ops\", \"go-to-market operations\", \"growth operations\", \"growth ops\", \"outbound sales\", \"outbound operations\", \"business development\", \"business developer\", \"partnerships\", \"partner manager\", \"alliances\", \"customer success manager\", \"sales manager\", \"ingenieur d'affaires\", \"charge d'affaires\", \"charge de developpement commercial\", \"responsable grands comptes\", \"responsable comptes cles\", \"gestionnaire grands comptes\"];\nconst EXCLUDE = [\"head of sales\", \"vp sales\", \"vp of sales\", \"vice president of sales\", \"svp sales\", \"chief revenue officer\", \"chief sales officer\", \"directeur commercial\", \"directrice commerciale\", \"directeur des ventes\", \"sales director\", \"technico-commercial\", \"technico commercial\", \"commercial terrain\", \"commercial sedentaire\", \"commercial itinerant\", \"vendeur\", \"vendeuse\", \"televente\", \"teleconseiller\", \"teleprospecteur\", \"porte-a-porte\", \"vrp\", \"agent commercial\", \"agent general\", \"assurance\", \"assureur\", \"mutuelle\", \"prevoyance\", \"courtier\", \"immobilier\", \"btp\", \"batiment\", \"menuiserie\", \"fenetre\", \"isolation\", \"photovoltaique\", \"panneaux solaires\", \"automobile\", \"concession\", \"grande distribution\", \"pompes funebres\", \"sales engineer\", \"sales engineering\", \"presales\", \"pre-sales\", \"avant-vente\", \"sales development\", \"sdr\", \"salesforce\", \"recruteur\", \"recruitment\", \"talent acquisition\", \"stage\", \"alternance\", \"apprentissage\", \"stagiaire\"];\nconst L = [\"remote\", \"fully remote\", \"full remote\", \"remote-first\", \"remote france\", \"remote europe\", \"eu remote\", \"wfh\", \"work from home\", \"distributed\", \"anywhere\", \"worldwide\", \"teletravail\", \"distanciel\", \"hybrid\", \"hybride\", \"france\", \"nantes\", \"toulouse\", \"lyon\", \"paris\", \"bordeaux\", \"lille\", \"rennes\", \"nice\", \"montpellier\", \"marseille\", \"strasbourg\", \"nouvelle-aquitaine\", \"ile-de-france\", \"europe\", \"emea\", \"global\"];\nconst VAGUE_LOC = ['', 'unknown', 'not specified', 'n/a', 'na', 'none', '?', '-'];\nconst deburr = s => (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');\n\nconst filtered = (typeof allJobs !== 'undefined' ? allJobs : jobs).filter(j => {\n  const title = deburr(j.title);\n  const hay = deburr((j.title || '') + ' ' + (j.desc || ''));\n  if (EXCLUDE.some(k => title.indexOf(k) >= 0)) return false;\n  const roleMatch = INCLUDE.some(k => title.indexOf(k) >= 0);\n  const loc = deburr(j.location).trim();\n  const locationMatch = L.some(k => loc.indexOf(k) >= 0) || VAGUE_LOC.indexOf(loc) >= 0;\n  return roleMatch && locationMatch;\n});\n\nconst seen = new Set();\nconst unique = filtered.filter(j => {\n  const k = (j.title + '_' + j.company).toLowerCase();\n  if (seen.has(k)) return false;\n  seen.add(k);\n  return true;\n});\n\nreturn unique.map(j => ({ json: j }));\n"
-   },
-   "id": "filter-keywords",
-   "name": "Filter by Keywords",
-   "type": "n8n-nodes-base.code",
-   "typeVersion": 2,
-   "position": [
-    1776,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "jsCode": "const jobs = $input.all().map(i => i.json);\nconst MAX = parseInt($env.VEILLE_BATCH_MAX, 10) || 40;\nconst batch = jobs.slice(0, MAX);\n\nlet jobsText = '';\nfor (let i = 0; i < batch.length; i++) {\n  const j = batch[i];\n  jobsText += (i+1) + '. ' + j.title + ' @ ' + j.company + ' (' + j.location + ')\\n';\n  jobsText += 'Source: ' + j.source + ' | URL: ' + j.url + '\\n';\n  jobsText += 'Desc: ' + (j.desc || '').substring(0, 300) + '\\n\\n';\n}\n\nconst sys = 'Tu es un assistant de veille emploi pour un candidat base a Bordeaux, qui recherche surtout du REMOTE. Profil cible: Account Executive, Account Manager / Key Account, Revenue Operations, Sales Ops, GTM Ops, Outbound/Growth Ops, Business Development. Secteurs prioritaires: crypto-fintech, foodtech, AI, SaaS. NON cible (score bas): postes trop seniors (Head of Sales, VP, Director), technico-commercial, assurance, BTP, vente terrain. Score chaque offre 0-10 selon pertinence. Reponds UNIQUEMENT avec un JSON valide, aucun texte autour.';\n\nconst usr = 'Voici ' + batch.length + ' offres issues d alertes email. Pour chaque offre, donne un score (0-10), une raison courte (max 15 mots) et une classe (top si >=7, watch si 4-6, skip si <4).\\n\\nFormat de reponse: un objet JSON avec une cle scores qui est un tableau. Chaque element a les cles n, score, class, reason.\\n\\nOffres:\\n' + jobsText;\n\nconst msgs = [\n  { role: 'system', content: sys },\n  { role: 'user', content: usr }\n];\nconst opts = { temperature: 0 };\nconst requestBody = { model: $env.VEILLE_SCORE_MODEL_LOCAL, messages: msgs, stream: false, format: 'json', options: opts };\n\nconst out = { requestBody: requestBody, jobs: batch, jobsCount: batch.length };\nreturn [{ json: out }];"
-   },
-   "id": "prepare-scoring",
-   "name": "Prepare Scoring",
-   "type": "n8n-nodes-base.code",
-   "typeVersion": 2,
-   "position": [
-    2000,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "method": "POST",
-    "url": "={{ $env.OLLAMA_LOCAL_URL }}/api/chat",
-    "sendBody": true,
-    "specifyBody": "json",
-    "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
-    "options": {
-     "timeout": 300000
-    }
-   },
-   "id": "score-llm",
-   "name": "Score LLM",
-   "type": "n8n-nodes-base.httpRequest",
-   "typeVersion": 4.4,
-   "position": [
-    2224,
-    400
-   ],
-   "retryOnFail": true,
-   "maxTries": 3,
-   "waitBetweenTries": 5000,
-   "onError": "continueRegularOutput"
-  },
-  {
-   "parameters": {
-    "jsCode": "const llm = $input.first().json;\nconst preparedJobs = $('Prepare Scoring').first().json.jobs || [];\n\nconst TO_EMAIL = $env.VEILLE_TO_EMAIL;\n\nfunction esc(s) {\n  return String(s == null ? '' : s)\n    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;');\n}\n\nlet scores = [];\ntry {\n  const content = llm.message && llm.message.content ? llm.message.content : '';\n  const parsed = typeof content === 'string' ? JSON.parse(content) : content;\n  scores = parsed.scores || [];\n} catch (e) { scores = []; }\n\nconst scored = preparedJobs.map((j, i) => {\n  const found = scores.find(x => Number(x.n) === (i+1));\n  const score = found ? (found.score || 0) : 0;\n  const klass = found ? (found.class || 'skip') : 'skip';\n  const reason = found ? (found.reason || '') : 'non score';\n  return Object.assign({}, j, { score: score, klass: klass, reason: reason });\n});\n\nconst top = scored.filter(j => j.klass === 'top').sort((a,b) => b.score - a.score);\nconst watch = scored.filter(j => j.klass === 'watch').sort((a,b) => b.score - a.score);\n\nconst today = new Date().toISOString().substring(0, 10);\n\n// --- Markdown (for file Save Digest) ---\nlet md = '# Veille Emploi Emails — ' + today + '\\n\\n';\nmd += '_' + scored.length + ' offres extraites — ' + top.length + ' top, ' + watch.length + ' a suivre_\\n\\n';\nmd += '## Top (score >= 7)\\n\\n';\nif (top.length === 0) md += '_Aucune offre top aujourd hui._\\n\\n';\nfor (const j of top) {\n  md += '### [' + j.score + '/10] ' + j.title + ' — ' + j.company + '\\n';\n  md += '- Location: ' + j.location + '\\n';\n  md += '- Source: ' + j.source + '\\n';\n  md += '- URL: ' + j.url + '\\n';\n  md += '- Raison: ' + j.reason + '\\n';\n  if (j.salary) md += '- Salary: ' + j.salary + '\\n';\n  md += '\\n';\n}\nmd += '## A suivre (4-6)\\n\\n';\nif (watch.length === 0) md += '_Aucune offre a suivre._\\n\\n';\nfor (const j of watch) {\n  md += '- [' + j.score + '/10] [' + j.title + '](' + j.url + ') @ ' + j.company + ' — ' + j.location + ' — _' + j.reason + '_\\n';\n}\n\n// --- HTML (for email) ---\nfunction jobCard(j) {\n  const badge = '<span style=\"display:inline-block;background:#0969da;color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;\">' + j.score + '/10</span>';\n  return '<div style=\"border:1px solid #e1e4e8;border-radius:6px;padding:12px;margin:8px 0;\">'\n    + '<div style=\"font-size:15px;font-weight:600;\">' + badge + ' ' + esc(j.title) + ' — ' + esc(j.company) + '</div>'\n    + '<div style=\"font-size:13px;color:#57606a;margin-top:4px;\">' + esc(j.location) + ' · ' + esc(j.source) + '</div>'\n    + '<div style=\"font-size:13px;margin-top:6px;\"><a href=\"' + esc(j.url) + '\" style=\"color:#0969da;text-decoration:none;\">Voir l\\'offre →</a></div>'\n    + '<div style=\"font-size:13px;color:#24292f;margin-top:6px;\"><em>' + esc(j.reason) + '</em></div>'\n    + '</div>';\n}\nfunction watchLine(j) {\n  return '<li style=\"font-size:13px;margin:4px 0;\"><strong>[' + j.score + '/10]</strong> <a href=\"' + esc(j.url) + '\" style=\"color:#0969da;\">' + esc(j.title) + '</a> @ ' + esc(j.company) + ' — ' + esc(j.location) + ' — <em>' + esc(j.reason) + '</em></li>';\n}\n\nlet inner = '<p style=\"font-size:14px;color:#57606a;\">' + scored.length + ' offres extraites — ' + top.length + ' top, ' + watch.length + ' a suivre.</p>';\ninner += '<h2 style=\"font-size:16px;margin-top:24px;\">Top (score &gt;= 7)</h2>';\nif (top.length === 0) inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre top aujourd hui.</em></p>';\nelse inner += top.map(jobCard).join('');\ninner += '<h2 style=\"font-size:16px;margin-top:24px;\">A suivre (4-6)</h2>';\nif (watch.length === 0) inner += '<p style=\"font-size:13px;color:#6a737d;\"><em>Aucune offre a suivre.</em></p>';\nelse inner += '<ul style=\"padding-left:20px;\">' + watch.map(watchLine).join('') + '</ul>';\n\nconst html = '<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2328;\">'\n  + '<div style=\"max-width:680px;margin:0 auto;padding:24px;\">'\n  + '<h1 style=\"font-size:20px;margin:0 0 16px;\">Veille Emploi Emails — ' + today + '</h1>'\n  + inner\n  + '<hr style=\"border:0;border-top:1px solid #e1e4e8;margin:24px 0;\">'\n  + '<div style=\"font-size:12px;color:#6a737d;\">Veille Emploi · alertes plateformes · ' + esc(today) + '</div>'\n  + '</div></body></html>';\n\nconst subject = '[Veille] Email Alerts ' + today + ' — ' + top.length + ' top, ' + watch.length + ' a suivre';\n\nconst filePath = $env.VEILLE_OUTPUT_DIR + '/emails/' + today + '.md';\nconst base64 = Buffer.from(md, 'utf-8').toString('base64');\n\nreturn [{\n  json: {\n    filePath: filePath, count: scored.length, topCount: top.length, watchCount: watch.length,\n    to: TO_EMAIL, subject: subject, html: html\n  },\n  binary: { data: { data: base64, mimeType: 'text/markdown', fileName: today + '.md', fileExtension: 'md' } }\n}];\n"
-   },
-   "id": "format-digest",
-   "name": "Format Digest",
-   "type": "n8n-nodes-base.code",
-   "typeVersion": 2,
-   "position": [
-    2448,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "operation": "write",
-    "fileName": "={{ $json.filePath }}",
-    "options": {}
-   },
-   "id": "save-digest",
-   "name": "Save Digest",
-   "type": "n8n-nodes-base.readWriteFile",
-   "typeVersion": 1.1,
-   "position": [
-    2672,
-    400
-   ]
-  },
-  {
-   "parameters": {
-    "operation": "get",
-    "messageId": "={{ $json.id }}",
-    "simple": false,
-    "options": {}
-   },
-   "id": "fetch-full",
-   "name": "Fetch Email Full",
-   "type": "n8n-nodes-base.gmail",
-   "typeVersion": 2.2,
-   "position": [
-    880,
-    400
-   ],
-   "webhookId": "c54afa88-0c52-43f5-9a0f-e97377a7a8fd",
-   "retryOnFail": true,
-   "maxTries": 3,
-   "waitBetweenTries": 3000,
-   "credentials": {
-    "gmailOAuth2": {
-     "id": "YVA0CrdAF8TfHKS8",
-     "name": "Gmail account veille emploi"
-    }
-   },
-   "onError": "continueRegularOutput"
-  },
-  {
-   "parameters": {
-    "sendTo": "={{ $json.to }}",
-    "subject": "={{ $json.subject }}",
-    "message": "={{ $json.html }}",
-    "options": {
-     "appendAttribution": false
-    }
-   },
-   "id": "send-digest-email-w2",
-   "name": "Send Digest Email",
-   "type": "n8n-nodes-base.gmail",
-   "typeVersion": 2.1,
-   "position": [
-    2896,
-    400
-   ],
-   "webhookId": "b9c55e02-f9eb-49f8-abeb-0a485ac727dc",
-   "credentials": {
-    "gmailOAuth2": {
-     "id": "YVA0CrdAF8TfHKS8",
-     "name": "Gmail account veille emploi"
-    }
-   },
-   "onError": "continueRegularOutput"
-  },
-  {
-   "parameters": {
-    "operation": "removeItemsSeenInPreviousExecutions",
-    "dedupeValue": "={{ $json.id }}",
-    "options": {
-     "scope": "node",
-     "historySize": 10000
-    }
-   },
-   "id": "dedup-new-emails",
-   "name": "Dedup New Emails",
-   "type": "n8n-nodes-base.removeDuplicates",
-   "typeVersion": 2,
-   "position": [
-    656,
-    400
-   ]
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "y3fd7SBf6dhU261q",
+    "executionTimeout": 900
   }
- ],
- "connections": {
-  "Daily 9h30": {
-   "main": [
-    [
-     {
-      "node": "Fetch Email IDs",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Build Extract Request": {
-   "main": [
-    [
-     {
-      "node": "Extract Jobs (LLM)",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Extract Jobs (LLM)": {
-   "main": [
-    [
-     {
-      "node": "Parse & Normalize",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Parse & Normalize": {
-   "main": [
-    [
-     {
-      "node": "Filter by Keywords",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Filter by Keywords": {
-   "main": [
-    [
-     {
-      "node": "Prepare Scoring",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Prepare Scoring": {
-   "main": [
-    [
-     {
-      "node": "Score LLM",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Score LLM": {
-   "main": [
-    [
-     {
-      "node": "Format Digest",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Format Digest": {
-   "main": [
-    [
-     {
-      "node": "Save Digest",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Fetch Email IDs": {
-   "main": [
-    [
-     {
-      "node": "Dedup New Emails",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Fetch Email Full": {
-   "main": [
-    [
-     {
-      "node": "Build Extract Request",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Save Digest": {
-   "main": [
-    [
-     {
-      "node": "Send Digest Email",
-      "type": "main",
-      "index": 0
-     }
-    ]
-   ]
-  },
-  "Dedup New Emails": {
-   "main": [
-    [
-     {
-      "node": "Fetch Email Full",
-      "type": "main",
-      "index": 0
-     }
-    ],
-    []
-   ]
-  }
- },
- "settings": {
-  "executionOrder": "v1",
-  "timezone": "Europe/Paris",
-  "saveManualExecutions": true,
-  "callerPolicy": "workflowsFromSameOwner",
-  "errorWorkflow": "y3fd7SBf6dhU261q",
-  "executionTimeout": 900
- }
 }
